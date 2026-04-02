@@ -1,6 +1,12 @@
 import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { loadMergedInstincts, upsertDrafts } from "./instincts.js";
+import {
+	loadMergedInstincts,
+	loadPendingInstincts,
+	removePendingInstincts,
+	stagePendingDrafts,
+	upsertDrafts,
+} from "./instincts.js";
 import { resolveActiveOrDefaultModel } from "./model-selection.js";
 import { loadConfig, loadObserverState, readObservations, saveObserverState } from "./storage.js";
 import type { InstinctDraft, ProjectInfo, StorageLayout } from "./types.js";
@@ -29,6 +35,11 @@ Rules:
 - Use confidence between 0.3 and 0.9
 - Use scope "global" only for universal patterns
 - Never include raw code snippets
+- Prefer atomic, clusterable instincts over broad summary rules
+- It is acceptable for multiple instincts to share the same trigger when they capture distinct steps or checks in the same workflow
+- Reuse existing instinct IDs only when the trigger and action are materially the same
+- Avoid generic instincts like "follow repo conventions" or "write better tests"
+- If evidence is tentative, still return the instinct with lower confidence rather than inventing a broad confident rule
 - If nothing is worth learning, return {"instincts":[]}`;
 
 export interface ObserverRuntimeState {
@@ -43,17 +54,37 @@ function scrubText(text: string | undefined, maxLength: number): string | undefi
 	return text.replace(/\s+/gu, " ").trim().slice(0, maxLength);
 }
 
+function summarizeExistingInstincts(
+	instincts: Array<{ id: string; trigger: string; content: string; confidence: number }>,
+): string {
+	if (instincts.length === 0) {
+		return "(none)";
+	}
+	return instincts
+		.slice(0, 12)
+		.map((instinct) => {
+			const actionMatch = instinct.content.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u);
+			const action = actionMatch?.[1]?.trim().split("\n")[0] ?? "no action";
+			return `- ${instinct.id} (${Math.round(instinct.confidence * 100)}%): ${instinct.trigger} -> ${action}`;
+		})
+		.join("\n");
+}
+
 function buildObservationPrompt(
 	project: ProjectInfo,
 	recentObservations: ReturnType<typeof scrubText>[],
-	existingIds: string[],
+	existingInstincts: Array<{ id: string; trigger: string; content: string; confidence: number }>,
+	pendingInstincts: Array<{ id: string; trigger: string; content: string; confidence: number }>,
 ): string {
 	const lines = [
 		`Project: ${project.name} (${project.id})`,
 		project.remote ? `Remote: ${project.remote}` : "Remote: none",
 		"",
-		"Existing instinct IDs:",
-		existingIds.length > 0 ? existingIds.join(", ") : "(none)",
+		"Existing active instincts:",
+		summarizeExistingInstincts(existingInstincts),
+		"",
+		"Existing pending instincts:",
+		summarizeExistingInstincts(pendingInstincts),
 		"",
 		"Recent observations:",
 	];
@@ -199,6 +230,7 @@ export async function maybeAnalyzeObservations(
 	}
 
 	const existingInstincts = await loadMergedInstincts(layout);
+	const pendingInstincts = await loadPendingInstincts(layout);
 	const sampled = pendingObservations
 		.slice(-config.observer.maxRecentObservations)
 		.map(formatObservationForPrompt)
@@ -212,7 +244,18 @@ export async function maybeAnalyzeObservations(
 				text: buildObservationPrompt(
 					project,
 					sampled,
-					existingInstincts.map((instinct) => instinct.id),
+					existingInstincts.map((instinct) => ({
+						id: instinct.id,
+						trigger: instinct.trigger,
+						content: instinct.content,
+						confidence: instinct.confidence,
+					})),
+					pendingInstincts.map((instinct) => ({
+						id: instinct.id,
+						trigger: instinct.trigger,
+						content: instinct.content,
+						confidence: instinct.confidence,
+					})),
 				),
 			},
 		],
@@ -239,7 +282,18 @@ export async function maybeAnalyzeObservations(
 			.map((item) => item.text)
 			.join("\n");
 		const drafts = parseDrafts(text);
-		await upsertDrafts(layout, project, existingInstincts, drafts);
+		const activeDrafts = drafts.filter((draft) => draft.confidence >= 0.7);
+		const pendingDrafts = drafts.filter((draft) => draft.confidence < 0.7);
+		if (activeDrafts.length > 0) {
+			await upsertDrafts(layout, project, existingInstincts, activeDrafts);
+			await removePendingInstincts(
+				layout,
+				activeDrafts.map((draft) => draft.id),
+			);
+		}
+		if (pendingDrafts.length > 0) {
+			await stagePendingDrafts(layout, project, pendingDrafts);
+		}
 		await saveObserverState(layout, {
 			lastAnalyzedIndex: observations.length,
 			lastAnalyzedAt: new Date().toISOString(),

@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat, unlink } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { fileExists, writeTextFile } from "./storage.js";
@@ -38,6 +38,8 @@ const TRIGGER_STOP_WORDS = new Set([
 	"or",
 	"and",
 ]);
+const PENDING_TTL_DAYS = 30;
+const PENDING_EXPIRY_WARNING_DAYS = 7;
 
 function clampConfidence(value: number): number {
 	return Math.max(0.3, Math.min(0.95, Number.isFinite(value) ? value : 0.5));
@@ -189,10 +191,25 @@ async function loadInstinctsFromDir(
 	return instincts;
 }
 
+async function loadPendingInstinctsFromDir(dirPath: string, scopeLabel: InstinctScope): Promise<LoadedInstinct[]> {
+	const instincts = await loadInstinctsFromDir(dirPath, "personal", scopeLabel);
+	return instincts.map((instinct) => ({
+		...instinct,
+		sourceType: "personal",
+	}));
+}
+
 export async function loadProjectOnlyInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
 	const personal = await loadInstinctsFromDir(layout.projectPersonalDir, "personal", "project");
 	const inherited = await loadInstinctsFromDir(layout.projectInheritedDir, "inherited", "project");
 	return [...personal, ...inherited];
+}
+
+export async function loadPendingInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
+	return [
+		...(await loadPendingInstinctsFromDir(layout.projectPendingDir, "project")),
+		...(await loadPendingInstinctsFromDir(layout.globalPendingDir, "global")),
+	];
 }
 
 export async function loadMergedInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
@@ -284,6 +301,58 @@ export async function upsertDrafts(
 	}
 
 	return written;
+}
+
+export async function stagePendingDrafts(
+	layout: StorageLayout,
+	project: ProjectInfo,
+	drafts: InstinctDraft[],
+): Promise<LoadedInstinct[]> {
+	const existing = await loadPendingInstincts(layout);
+	const existingById = new Map(existing.map((instinct) => [instinct.id, instinct]));
+	const written: LoadedInstinct[] = [];
+
+	for (const draft of drafts) {
+		const scope = draft.scope === "global" ? "global" : "project";
+		const targetDir = scope === "global" ? layout.globalPendingDir : layout.projectPendingDir;
+		const filePath = join(targetDir, `${draft.id}.md`);
+		const now = new Date().toISOString();
+		const previous = existingById.get(draft.id);
+		const record: InstinctRecord = {
+			id: draft.id,
+			title: normalizeString(draft.title || draft.id),
+			trigger: normalizeString(draft.trigger || `when ${draft.id}`),
+			confidence: clampConfidence(draft.confidence),
+			domain: normalizeString(draft.domain || previous?.domain || "general"),
+			source: "session-observation-pending",
+			scope,
+			projectId: scope === "project" ? project.id : undefined,
+			projectName: scope === "project" ? project.name : undefined,
+			content: buildInstinctContent(draft.title || draft.id, draft.action, draft.evidence),
+			created: previous?.created ?? now,
+			updated: now,
+		};
+		await writeTextFile(filePath, serializeInstinct(record));
+		written.push({
+			...record,
+			filePath,
+			sourceType: "personal",
+			scopeLabel: scope,
+		});
+	}
+
+	return written;
+}
+
+export async function removePendingInstincts(layout: StorageLayout, instinctIds: string[]): Promise<void> {
+	for (const instinctId of instinctIds) {
+		for (const dir of [layout.projectPendingDir, layout.globalPendingDir]) {
+			const filePath = join(dir, `${instinctId}.md`);
+			if (await fileExists(filePath)) {
+				await unlink(filePath).catch(() => {});
+			}
+		}
+	}
 }
 
 export function parseInstinctExport(content: string): LoadedInstinct[] {
@@ -415,6 +484,87 @@ export function renderInstinctExport(instincts: LoadedInstinct[]): string {
 		"",
 	];
 	return header.concat(instincts.map((instinct) => serializeInstinct(instinct))).join("\n\n");
+}
+
+export interface PendingInstinctInfo {
+	path: string;
+	name: string;
+	scope: InstinctScope;
+	created: string;
+	ageDays: number;
+}
+
+async function parsePendingCreatedDate(filePath: string): Promise<Date | null> {
+	try {
+		const raw = await readFile(filePath, "utf-8");
+		const { frontmatter } = parseFrontmatter<Record<string, unknown>>(raw);
+		if (typeof frontmatter.created === "string" && frontmatter.created.trim().length > 0) {
+			const date = new Date(frontmatter.created);
+			if (!Number.isNaN(date.getTime())) {
+				return date;
+			}
+		}
+	} catch {}
+	try {
+		const info = await stat(filePath);
+		return info.mtime;
+	} catch {
+		return null;
+	}
+}
+
+export async function collectPendingInstincts(layout: StorageLayout): Promise<PendingInstinctInfo[]> {
+	const dirs: Array<{ dir: string; scope: InstinctScope }> = [
+		{ dir: layout.projectPendingDir, scope: "project" },
+		{ dir: layout.globalPendingDir, scope: "global" },
+	];
+	const now = Date.now();
+	const results: PendingInstinctInfo[] = [];
+	for (const { dir, scope } of dirs) {
+		if (!(await fileExists(dir))) {
+			continue;
+		}
+		const entries = await readdir(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile() || !ALLOWED_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+				continue;
+			}
+			const filePath = join(dir, entry.name);
+			const created = await parsePendingCreatedDate(filePath);
+			if (!created) {
+				continue;
+			}
+			const ageDays = Math.floor((now - created.getTime()) / (24 * 60 * 60 * 1000));
+			results.push({
+				path: filePath,
+				name: basename(entry.name, extname(entry.name)),
+				scope,
+				created: created.toISOString(),
+				ageDays,
+			});
+		}
+	}
+	return results.sort((left, right) => right.ageDays - left.ageDays);
+}
+
+export async function prunePendingInstincts(
+	layout: StorageLayout,
+	maxAge: number = PENDING_TTL_DAYS,
+	dryRun: boolean = false,
+): Promise<{ pruned: PendingInstinctInfo[]; remaining: PendingInstinctInfo[] }> {
+	const pending = await collectPendingInstincts(layout);
+	const pruned = pending.filter((item) => item.ageDays >= maxAge);
+	const remaining = pending.filter((item) => item.ageDays < maxAge);
+	if (!dryRun) {
+		for (const item of pruned) {
+			await unlink(item.path).catch(() => {});
+		}
+	}
+	return { pruned, remaining };
+}
+
+export function pendingExpiryThresholdDays(): number {
+	return PENDING_TTL_DAYS - PENDING_EXPIRY_WARNING_DAYS;
 }
 
 export function analyzeEvolution(instincts: LoadedInstinct[]): EvolveAnalysis {

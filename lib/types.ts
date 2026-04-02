@@ -34,6 +34,7 @@ export interface StorageLayout {
 	registryPath: string;
 	globalPersonalDir: string;
 	globalInheritedDir: string;
+	globalPendingDir: string;
 	globalEvolvedSkillsDir: string;
 	globalEvolvedPromptsDir: string;
 	globalEvolvedAgentsDir: string;
@@ -42,6 +43,7 @@ export interface StorageLayout {
 	projectMetadataPath: string;
 	projectPersonalDir: string;
 	projectInheritedDir: string;
+	projectPendingDir: string;
 	projectEvolvedSkillsDir: string;
 	projectEvolvedPromptsDir: string;
 	projectEvolvedAgentsDir: string;

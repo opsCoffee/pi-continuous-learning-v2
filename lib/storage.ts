@@ -58,6 +58,7 @@ export function getStorageLayout(project: ProjectInfo): StorageLayout {
 		registryPath: join(rootDir, "projects.json"),
 		globalPersonalDir: join(rootDir, "instincts", "global", "personal"),
 		globalInheritedDir: join(rootDir, "instincts", "global", "inherited"),
+		globalPendingDir: join(rootDir, "instincts", "global", "pending"),
 		globalEvolvedSkillsDir: join(rootDir, "evolved", "skills"),
 		globalEvolvedPromptsDir: join(rootDir, "evolved", "prompts"),
 		globalEvolvedAgentsDir: join(rootDir, "evolved", "agents"),
@@ -66,6 +67,7 @@ export function getStorageLayout(project: ProjectInfo): StorageLayout {
 		projectMetadataPath: join(projectDir, "project.json"),
 		projectPersonalDir: join(projectDir, "instincts", "personal"),
 		projectInheritedDir: join(projectDir, "instincts", "inherited"),
+		projectPendingDir: join(projectDir, "instincts", "pending"),
 		projectEvolvedSkillsDir: join(project.root, ".pi", "skills"),
 		projectEvolvedPromptsDir: join(project.root, ".pi", "prompts"),
 		projectEvolvedAgentsDir: join(project.root, ".pi", "agents"),
@@ -78,12 +80,14 @@ export async function ensureStorage(project: ProjectInfo, layout: StorageLayout)
 	await mkdir(layout.rootDir, { recursive: true });
 	await mkdir(layout.globalPersonalDir, { recursive: true });
 	await mkdir(layout.globalInheritedDir, { recursive: true });
+	await mkdir(layout.globalPendingDir, { recursive: true });
 	await mkdir(layout.globalEvolvedSkillsDir, { recursive: true });
 	await mkdir(layout.globalEvolvedPromptsDir, { recursive: true });
 	await mkdir(layout.globalEvolvedAgentsDir, { recursive: true });
 	await mkdir(layout.projectStateDir, { recursive: true });
 	await mkdir(layout.projectPersonalDir, { recursive: true });
 	await mkdir(layout.projectInheritedDir, { recursive: true });
+	await mkdir(layout.projectPendingDir, { recursive: true });
 	await mkdir(layout.projectEvolvedSkillsDir, { recursive: true });
 	await mkdir(layout.projectEvolvedPromptsDir, { recursive: true });
 	await mkdir(layout.projectEvolvedAgentsDir, { recursive: true });
@@ -250,6 +254,7 @@ async function migrateLegacyProjectStorage(project: ProjectInfo, layout: Storage
 	await copyFileIfMissing(join(legacyProjectDir, "observer-state.json"), layout.observerStatePath);
 	await copyDirectoryIfTargetEmpty(join(legacyProjectDir, "instincts", "personal"), layout.projectPersonalDir);
 	await copyDirectoryIfTargetEmpty(join(legacyProjectDir, "instincts", "inherited"), layout.projectInheritedDir);
+	await copyDirectoryIfTargetEmpty(join(legacyProjectDir, "instincts", "pending"), layout.projectPendingDir);
 	await copyDirectoryIfTargetEmpty(join(legacyProjectDir, "evolved", "skills"), layout.projectEvolvedSkillsDir);
 	await copyDirectoryIfTargetEmpty(join(legacyProjectDir, "evolved", "prompts"), layout.projectEvolvedPromptsDir);
 	await copyDirectoryIfTargetEmpty(join(legacyProjectDir, "evolved", "agents"), layout.projectEvolvedAgentsDir);

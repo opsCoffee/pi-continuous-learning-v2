@@ -3,15 +3,19 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	analyzeEvolution,
+	collectPendingInstincts,
 	findPromotionCandidates,
 	generateEvolvedOutputs,
 	importInstincts,
 	loadMergedInstincts,
 	loadProjectOnlyInstincts,
 	parseInstinctExport,
+	pendingExpiryThresholdDays,
+	prunePendingInstincts,
 	renderInstinctExport,
 	serializeInstinct,
 } from "./instincts.js";
+import { applyLearnEvalResult, evaluateSessionLearning } from "./learn-eval.js";
 import { resolveActiveOrDefaultModel } from "./model-selection.js";
 import { createSkillFromRepository } from "./skill-create.js";
 import { loadProjectRegistry, writeTextFile } from "./storage.js";
@@ -128,6 +132,7 @@ export function registerContinuousLearningCommands(
 				return;
 			}
 			const instincts = await loadMergedInstincts(layout);
+			const pending = await collectPendingInstincts(layout);
 			const projectInstincts = instincts.filter((instinct) => instinct.scopeLabel === "project");
 			const globalInstincts = instincts.filter((instinct) => instinct.scopeLabel === "global");
 			const lines = [
@@ -154,6 +159,17 @@ export function registerContinuousLearningCommands(
 					lines.push(`trigger: ${instinct.trigger}`);
 					lines.push(`action: ${extractAction(instinct.content)}`);
 					lines.push("");
+				}
+			}
+			if (pending.length > 0) {
+				lines.push("---");
+				lines.push(`Pending instincts: ${pending.length} awaiting review`);
+				const expiringSoon = pending.filter((item) => item.ageDays >= pendingExpiryThresholdDays());
+				if (expiringSoon.length > 0) {
+					lines.push(`Expiring within 7 days:`);
+					for (const item of expiringSoon.slice(0, 10)) {
+						lines.push(`- ${item.name} (${Math.max(0, 30 - item.ageDays)}d remaining)`);
+					}
 				}
 			}
 			emitReport(pi, "continuous-learning-status", lines.join("\n"));
@@ -204,7 +220,7 @@ export function registerContinuousLearningCommands(
 
 	pi.registerCommand("instinct-import", {
 		description: "Import instincts from a file or URL",
-		handler: async (args, ctx) => {
+		handler: async (args, _ctx) => {
 			const { project, layout } = getState();
 			if (!project || !layout) {
 				return;
@@ -245,7 +261,7 @@ export function registerContinuousLearningCommands(
 
 	pi.registerCommand("promote", {
 		description: "Promote project instincts to global scope",
-		handler: async (args, ctx) => {
+		handler: async (args, _ctx) => {
 			const { layout } = getState();
 			if (!layout) {
 				return;
@@ -331,6 +347,33 @@ export function registerContinuousLearningCommands(
 				lines.push("");
 			}
 			emitReport(pi, "continuous-learning-projects", lines.join("\n"));
+		},
+	});
+
+	pi.registerCommand("prune", {
+		description: "Delete pending instincts older than the TTL threshold",
+		handler: async (args, _ctx) => {
+			const { layout } = getState();
+			if (!layout) {
+				return;
+			}
+			const parsed = parseArgs(args);
+			const maxAgeRaw = parsed.flags.get("max-age");
+			const maxAge = typeof maxAgeRaw === "string" ? Math.max(1, Number.parseInt(maxAgeRaw, 10) || 30) : 30;
+			const dryRun = parsed.flags.has("dry-run");
+			const summary = await prunePendingInstincts(layout, maxAge, dryRun);
+			const lines = [
+				`${dryRun ? "[DRY RUN] " : ""}Prune pending instincts older than ${maxAge} days`,
+				`Pruned: ${summary.pruned.length}`,
+				`Remaining: ${summary.remaining.length}`,
+			];
+			if (summary.pruned.length > 0) {
+				lines.push("", "## Pruned");
+				for (const item of summary.pruned) {
+					lines.push(`- ${item.name} (${item.ageDays}d)`);
+				}
+			}
+			emitReport(pi, "continuous-learning-prune", lines.join("\n"));
 		},
 	});
 
@@ -457,8 +500,99 @@ export function registerContinuousLearningCommands(
 		},
 	});
 
+	pi.registerCommand("learn-eval", {
+		description: "Extract one reusable session pattern, evaluate quality, and optionally save it as a learned skill",
+		handler: async (args, ctx) => {
+			const { project } = getState();
+			if (!project) {
+				return;
+			}
+
+			const parsed = parseArgs(args);
+			const applyRequested = parsed.flags.has("apply") || parsed.flags.has("force");
+			const resolvedModel = await resolveActiveOrDefaultModel(ctx.model, ctx.modelRegistry);
+			const model = resolvedModel.model;
+			if (!model) {
+				ctx.ui.notify("没有可用模型，无法执行 learn-eval", "warning");
+				return;
+			}
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok || !auth.apiKey) {
+				ctx.ui.notify(auth.ok ? "缺少模型 API key" : auth.error, "warning");
+				return;
+			}
+
+			try {
+				const result = await evaluateSessionLearning({
+					project,
+					sessionManager: ctx.sessionManager,
+					llm: {
+						model,
+						apiKey: auth.apiKey,
+						headers: auth.headers,
+					},
+				});
+
+				let applied = false;
+				if (result.quality.verdict !== "drop") {
+					if (ctx.hasUI && !applyRequested) {
+						const target =
+							result.quality.verdict === "absorb"
+								? (result.quality.absorbTarget ?? "existing skill")
+								: (result.targetPath ?? "new learned skill");
+						const confirmed = await ctx.ui.confirm(
+							result.quality.verdict === "absorb" ? "Absorb learned pattern?" : "Save learned pattern?",
+							`${target}\n\n${result.quality.rationale}`,
+						);
+						if (confirmed) {
+							await applyLearnEvalResult(result);
+							applied = true;
+						}
+					} else if (applyRequested) {
+						await applyLearnEvalResult(result);
+						applied = true;
+					}
+				}
+
+				if (applied && ctx.hasUI) {
+					await ctx.reload();
+				}
+
+				const lines = [
+					`LEARN EVAL - ${currentProjectLabel(project)}`,
+					`Verdict: ${result.quality.verdict}`,
+					`Scope: ${result.quality.scope}`,
+					`Target: ${result.quality.verdict === "absorb" ? (result.quality.absorbTarget ?? "existing skill") : (result.targetPath ?? "(none)")}`,
+					`Applied: ${applied ? "yes" : "no"}`,
+					"",
+					"### Checklist",
+					...result.quality.checklist.map((item) => `- ${item}`),
+					"",
+					`Rationale: ${result.quality.rationale}`,
+				];
+				if (result.quality.improvements && result.quality.improvements.length > 0) {
+					lines.push("", "### Improvements", ...result.quality.improvements.map((item) => `- ${item}`));
+				}
+				if (result.quality.absorbContent) {
+					lines.push("", "### Absorb Content", result.quality.absorbContent);
+				}
+				if (
+					result.skillMarkdown &&
+					(result.quality.verdict === "save" || result.quality.verdict === "improve-then-save")
+				) {
+					lines.push("", "### Draft Skill", result.skillMarkdown);
+				}
+
+				emitReport(pi, "continuous-learning-learn-eval", lines.join("\n"));
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`learn-eval 失败: ${message}`, "error");
+			}
+		},
+	});
+
 	pi.registerCommand("instinct-prune", {
-		description: "Prune obvious duplicate or superseded project instincts generated by repo analysis",
+		description: "Prune obvious duplicate or superseded active project instincts generated by repo analysis",
 		handler: async (_args, ctx) => {
 			const { layout } = getState();
 			if (!layout) {

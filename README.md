@@ -57,6 +57,8 @@ pi -e ./packages/coding-agent/examples/extensions/continuous-learning-v2
 - `/projects`
 - `/evolve`
 - `/skill-create`
+- `/learn-eval`
+- `/prune`
 - `/instinct-prune`
 
 ## Storage
@@ -75,6 +77,12 @@ Generated artifacts:
 <project>/.pi/skills/
 <project>/.pi/prompts/
 <project>/.pi/agents/
+```
+
+Pending instincts awaiting review:
+
+```text
+<project>/.pi/continuous-learning-v2/instincts/pending/
 ```
 
 Global config and global-scope instincts still live under:
@@ -106,6 +114,12 @@ Config file path:
 ```
 
 To enable automatic learning, set `observer.enabled` to `true`.
+
+Observer behavior:
+
+- higher-confidence observer instincts are written into active instinct storage
+- lower-confidence observer instincts are staged under `instincts/pending/`
+- `/prune` removes expired pending instincts (default TTL: 30 days)
 
 Observer and `skill-create` model selection follow this order:
 
@@ -146,6 +160,20 @@ Verdict behavior:
 - `improve-then-save`: performs one automatic revision pass, then re-evaluates before saving
 - `absorb`: does not write a new skill; returns absorb target and appendable content suggestion
 - `drop`: does not write a new skill
+
+## Learn Eval
+
+```bash
+/learn-eval
+/learn-eval --apply
+```
+
+`/learn-eval` reviews the current session path, extracts the single highest-value reusable pattern, applies a learn-eval style quality gate, and decides:
+
+- whether to save, improve, absorb, or drop
+- whether the pattern belongs in project scope or global scope
+
+By default it reports the draft and verdict. In interactive mode it asks for confirmation before saving or absorbing. In non-interactive mode, use `--apply` or `--force` to write the result.
 
 ## Notes
 
