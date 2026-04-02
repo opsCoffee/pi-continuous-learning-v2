@@ -1079,6 +1079,7 @@ async function improveSkillWithLlm(
 }
 
 function serializeInstinctDraft(project: ProjectInfo, instinct: LlmInstinctDraft): string {
+	const scope = project.id === "global" ? "global" : instinct.scope;
 	return serializeInstinct({
 		id: instinct.id,
 		title: instinct.title,
@@ -1086,9 +1087,9 @@ function serializeInstinctDraft(project: ProjectInfo, instinct: LlmInstinctDraft
 		confidence: instinct.confidence,
 		domain: instinct.domain,
 		source: "local-repo-analysis",
-		scope: instinct.scope,
-		projectId: instinct.scope === "project" ? project.id : undefined,
-		projectName: instinct.scope === "project" ? project.name : undefined,
+		scope,
+		projectId: scope === "project" ? project.id : undefined,
+		projectName: scope === "project" ? project.name : undefined,
 		content: [
 			`# ${instinct.title}`,
 			"",

@@ -53,8 +53,8 @@ export function getStorageLayout(project: ProjectInfo): StorageLayout {
 	const isGlobal = project.id === "global";
 	const projectStateDir = isGlobal ? rootDir : join(project.root, ".pi", "continuous-learning-v2");
 	const projectDir = projectStateDir;
-	const globalFallbackInstinctsDir = join(rootDir, "instincts", "_global_fallback");
 	return {
+		isGlobalProject: isGlobal,
 		rootDir,
 		configPath: join(rootDir, "config.json"),
 		registryPath: join(rootDir, "projects.json"),
@@ -68,13 +68,13 @@ export function getStorageLayout(project: ProjectInfo): StorageLayout {
 		projectDir,
 		projectMetadataPath: isGlobal ? join(rootDir, "global-project.json") : join(projectDir, "project.json"),
 		projectPersonalDir: isGlobal
-			? join(globalFallbackInstinctsDir, "personal")
+			? join(rootDir, "instincts", "global", "personal")
 			: join(projectDir, "instincts", "personal"),
 		projectInheritedDir: isGlobal
-			? join(globalFallbackInstinctsDir, "inherited")
+			? join(rootDir, "instincts", "global", "inherited")
 			: join(projectDir, "instincts", "inherited"),
 		projectPendingDir: isGlobal
-			? join(globalFallbackInstinctsDir, "pending")
+			? join(rootDir, "instincts", "global", "pending")
 			: join(projectDir, "instincts", "pending"),
 		projectEvolvedSkillsDir: isGlobal ? join(rootDir, "evolved", "skills") : join(project.root, ".pi", "skills"),
 		projectEvolvedPromptsDir: isGlobal ? join(rootDir, "evolved", "prompts") : join(project.root, ".pi", "prompts"),

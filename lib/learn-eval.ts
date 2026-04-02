@@ -357,6 +357,9 @@ export async function evaluateSessionLearning(options: LearnEvalOptions): Promis
 		droppedInstinctIds: [],
 		scope: "project" as const,
 	};
+	if (options.project.id === "global") {
+		quality.scope = "global";
+	}
 
 	let finalSkillMarkdown = skillMarkdown;
 	const finalQuality = { ...quality };

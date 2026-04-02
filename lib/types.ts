@@ -29,6 +29,7 @@ export interface ProjectInfo {
 }
 
 export interface StorageLayout {
+	isGlobalProject: boolean;
 	rootDir: string;
 	configPath: string;
 	registryPath: string;

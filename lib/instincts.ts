@@ -163,12 +163,18 @@ async function loadPendingInstinctsFromDir(dirPath: string, scopeLabel: Instinct
 }
 
 export async function loadProjectOnlyInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
+	if (layout.isGlobalProject) {
+		return [];
+	}
 	const personal = await loadInstinctsFromDir(layout.projectPersonalDir, "personal", "project");
 	const inherited = await loadInstinctsFromDir(layout.projectInheritedDir, "inherited", "project");
 	return [...personal, ...inherited];
 }
 
 export async function loadPendingInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
+	if (layout.isGlobalProject) {
+		return loadPendingInstinctsFromDir(layout.globalPendingDir, "global");
+	}
 	return [
 		...(await loadPendingInstinctsFromDir(layout.projectPendingDir, "project")),
 		...(await loadPendingInstinctsFromDir(layout.globalPendingDir, "global")),
@@ -176,6 +182,12 @@ export async function loadPendingInstincts(layout: StorageLayout): Promise<Loade
 }
 
 export async function loadMergedInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
+	if (layout.isGlobalProject) {
+		return [
+			...(await loadInstinctsFromDir(layout.globalPersonalDir, "personal", "global")),
+			...(await loadInstinctsFromDir(layout.globalInheritedDir, "inherited", "global")),
+		];
+	}
 	const merged = new Map<string, LoadedInstinct>();
 	const ordered = [
 		...(await loadInstinctsFromDir(layout.projectPersonalDir, "personal", "project")),
@@ -236,7 +248,7 @@ export async function upsertDrafts(
 
 	for (const draft of drafts) {
 		const existing = existingById.get(draft.id);
-		const scope = draft.scope === "global" ? "global" : "project";
+		const scope = layout.isGlobalProject ? "global" : draft.scope === "global" ? "global" : "project";
 		const targetDir = scope === "global" ? layout.globalPersonalDir : layout.projectPersonalDir;
 		const filePath = join(targetDir, `${draft.id}.md`);
 		const now = new Date().toISOString();
@@ -276,7 +288,7 @@ export async function stagePendingDrafts(
 	const written: LoadedInstinct[] = [];
 
 	for (const draft of drafts) {
-		const scope = draft.scope === "global" ? "global" : "project";
+		const scope = layout.isGlobalProject ? "global" : draft.scope === "global" ? "global" : "project";
 		const targetDir = scope === "global" ? layout.globalPendingDir : layout.projectPendingDir;
 		const filePath = join(targetDir, `${draft.id}.md`);
 		const now = new Date().toISOString();
@@ -309,7 +321,10 @@ export async function stagePendingDrafts(
 
 export async function removePendingInstincts(layout: StorageLayout, instinctIds: string[]): Promise<void> {
 	for (const instinctId of instinctIds) {
-		for (const dir of [layout.projectPendingDir, layout.globalPendingDir]) {
+		const dirs = layout.isGlobalProject
+			? [layout.globalPendingDir]
+			: [layout.projectPendingDir, layout.globalPendingDir];
+		for (const dir of dirs) {
 			const filePath = join(dir, `${instinctId}.md`);
 			if (await fileExists(filePath)) {
 				await unlink(filePath).catch(() => {});
@@ -376,6 +391,7 @@ export async function importInstincts(
 	minConfidence: number | undefined,
 	dryRun: boolean,
 ): Promise<ImportSummary> {
+	targetScope = layout.isGlobalProject && targetScope === "project" ? "global" : targetScope;
 	const targetDir = targetScope === "global" ? layout.globalInheritedDir : layout.projectInheritedDir;
 	const currentInstincts =
 		targetScope === "global"
@@ -477,10 +493,12 @@ async function parsePendingCreatedDate(filePath: string): Promise<Date | null> {
 }
 
 export async function collectPendingInstincts(layout: StorageLayout): Promise<PendingInstinctInfo[]> {
-	const dirs: Array<{ dir: string; scope: InstinctScope }> = [
-		{ dir: layout.projectPendingDir, scope: "project" },
-		{ dir: layout.globalPendingDir, scope: "global" },
-	];
+	const dirs: Array<{ dir: string; scope: InstinctScope }> = layout.isGlobalProject
+		? [{ dir: layout.globalPendingDir, scope: "global" }]
+		: [
+				{ dir: layout.projectPendingDir, scope: "project" },
+				{ dir: layout.globalPendingDir, scope: "global" },
+			];
 	const now = Date.now();
 	const results: PendingInstinctInfo[] = [];
 	for (const { dir, scope } of dirs) {
