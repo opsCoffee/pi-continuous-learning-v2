@@ -348,7 +348,9 @@ export function registerContinuousLearningCommands(
 			let generated: string[] = [];
 			if (generate) {
 				generated = await generateEvolvedOutputs(layout, analysis);
-				await ctx.reload();
+				if (ctx.hasUI) {
+					await ctx.reload();
+				}
 			}
 			const lines = [
 				`EVOLVE ANALYSIS - ${instincts.length} instincts`,
@@ -398,6 +400,7 @@ export function registerContinuousLearningCommands(
 						model: NonNullable<typeof model>;
 						apiKey: string;
 						headers?: Record<string, string>;
+						modelRegistry: typeof ctx.modelRegistry;
 				  }
 				| undefined;
 			if (model) {
@@ -407,6 +410,7 @@ export function registerContinuousLearningCommands(
 						model,
 						apiKey: auth.apiKey,
 						headers: auth.headers,
+						modelRegistry: ctx.modelRegistry,
 					};
 				}
 			}
@@ -422,7 +426,7 @@ export function registerContinuousLearningCommands(
 					llm,
 				});
 
-				if (!output || result.skillPath.startsWith(layout.projectEvolvedSkillsDir)) {
+				if (ctx.hasUI && (!output || result.skillPath.startsWith(layout.projectEvolvedSkillsDir))) {
 					await ctx.reload();
 				}
 
@@ -444,7 +448,7 @@ export function registerContinuousLearningCommands(
 					customType: "continuous-learning-skill-create",
 					content: `${result.summary}${llm ? `\n使用模型: ${llm.model.provider}/${llm.model.id}` : "\n使用模型: none"}${includeInstincts ? `\n--instincts 已启用` : ""}`,
 					display: true,
-					details,
+					details: ctx.hasUI ? details : undefined,
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

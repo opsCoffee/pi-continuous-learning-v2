@@ -139,7 +139,7 @@ export interface SkillCreateQualityReport {
 export interface SkillCreateMessageDetails {
 	repoName: string;
 	commitCount: number;
-	generationMode: "LLM" | "fallback";
+	generationMode: "agentic" | "fallback";
 	llmStatus: string;
 	modelLabel?: string;
 	modelSource: "active" | "settings" | "none";

@@ -15,6 +15,29 @@ import type {
 } from "./types.js";
 
 const ALLOWED_EXTENSIONS = new Set([".md", ".yaml", ".yml"]);
+const TRIGGER_STOP_WORDS = new Set([
+	"when",
+	"creating",
+	"writing",
+	"adding",
+	"implementing",
+	"testing",
+	"handling",
+	"modifying",
+	"changing",
+	"updating",
+	"working",
+	"using",
+	"doing",
+	"with",
+	"for",
+	"the",
+	"a",
+	"an",
+	"to",
+	"or",
+	"and",
+]);
 
 function clampConfidence(value: number): number {
 	return Math.max(0.3, Math.min(0.95, Number.isFinite(value) ? value : 0.5));
@@ -31,6 +54,45 @@ function slugify(value: string): string {
 		.replace(/^-+/u, "")
 		.replace(/-+$/u, "")
 		.slice(0, 40);
+}
+
+function humanizeSlug(value: string): string {
+	return value
+		.split("-")
+		.filter((part) => part.length > 0)
+		.map((part) => part[0]?.toUpperCase() + part.slice(1))
+		.join(" ");
+}
+
+function renderWhenClause(trigger: string): string {
+	const normalized = normalizeString(trigger);
+	return normalized.replace(/^when\s+/iu, "");
+}
+
+function normalizeTriggerKey(trigger: string, domain: string): string {
+	const normalized = normalizeString(trigger)
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/gu, " ")
+		.split(" ")
+		.filter((part) => part.length > 0 && !TRIGGER_STOP_WORDS.has(part))
+		.join(" ");
+	return normalized.length > 0 ? normalized : `${domain} ${slugify(trigger) || "pattern"}`;
+}
+
+function buildFrontmatterLines(entries: Array<[string, string | string[]]>): string[] {
+	const lines = ["---"];
+	for (const [key, value] of entries) {
+		if (Array.isArray(value)) {
+			lines.push(`${key}:`);
+			for (const item of value) {
+				lines.push(`  - ${item}`);
+			}
+			continue;
+		}
+		lines.push(`${key}: ${value}`);
+	}
+	lines.push("---", "");
+	return lines;
 }
 
 function inferTitle(body: string, fallback: string): string {
@@ -358,7 +420,7 @@ export function renderInstinctExport(instincts: LoadedInstinct[]): string {
 export function analyzeEvolution(instincts: LoadedInstinct[]): EvolveAnalysis {
 	const groups = new Map<string, LoadedInstinct[]>();
 	for (const instinct of instincts) {
-		const key = slugify(instinct.trigger) || instinct.id;
+		const key = normalizeTriggerKey(instinct.trigger, instinct.domain);
 		const existing = groups.get(key) ?? [];
 		existing.push(instinct);
 		groups.set(key, existing);
@@ -367,9 +429,10 @@ export function analyzeEvolution(instincts: LoadedInstinct[]): EvolveAnalysis {
 	const clusterCandidates: ClusterCandidate[] = Array.from(groups.entries())
 		.map(([key, group]) => {
 			const averageConfidence = group.reduce((sum, instinct) => sum + instinct.confidence, 0) / group.length;
+			const slug = slugify(key) || slugify(group[0].trigger) || group[0].id;
 			return {
-				key,
-				title: group[0].title,
+				key: slug,
+				title: humanizeSlug(slug) || group[0].title,
 				trigger: group[0].trigger,
 				instincts: [...group].sort((left, right) => right.confidence - left.confidence),
 				averageConfidence,
@@ -377,15 +440,21 @@ export function analyzeEvolution(instincts: LoadedInstinct[]): EvolveAnalysis {
 				scopes: Array.from(new Set(group.map((instinct) => instinct.scopeLabel))),
 			};
 		})
-		.sort((left, right) => right.averageConfidence - left.averageConfidence);
+		.sort((left, right) => {
+			const sizeDelta = right.instincts.length - left.instincts.length;
+			if (sizeDelta !== 0) {
+				return sizeDelta;
+			}
+			return right.averageConfidence - left.averageConfidence;
+		});
 
 	return {
 		skillCandidates: clusterCandidates.filter((candidate) => candidate.instincts.length >= 2),
 		promptCandidates: instincts
-			.filter((instinct) => instinct.domain === "workflow" && instinct.confidence >= 0.6)
+			.filter((instinct) => instinct.domain === "workflow" && instinct.confidence >= 0.7)
 			.sort((left, right) => right.confidence - left.confidence),
 		agentCandidates: clusterCandidates.filter(
-			(candidate) => candidate.instincts.length >= 3 && candidate.averageConfidence >= 0.7,
+			(candidate) => candidate.instincts.length >= 3 && candidate.averageConfidence >= 0.75,
 		),
 	};
 }
@@ -396,33 +465,63 @@ export async function generateEvolvedOutputs(layout: StorageLayout, analysis: Ev
 	for (const candidate of analysis.skillCandidates.slice(0, 5)) {
 		const slug = slugify(candidate.key) || "instinct-skill";
 		const skillPath = join(layout.projectEvolvedSkillsDir, slug, "SKILL.md");
+		const evolvedFrom = candidate.instincts.map((instinct) => instinct.id);
 		const body = [
-			"---",
-			`description: Evolved from ${candidate.instincts.length} instincts`,
-			"---",
-			"",
+			...buildFrontmatterLines([
+				["name", slug],
+				["description", `Evolved from ${candidate.instincts.length} instincts about ${candidate.trigger}`],
+				["evolved_from", evolvedFrom],
+			]),
 			`# ${candidate.title}`,
 			"",
-			`Use this skill when ${candidate.trigger}.`,
+			`Use this skill when ${renderWhenClause(candidate.trigger)}.`,
+			"",
+			`Evolved from ${candidate.instincts.length} instincts (avg confidence: ${Math.round(candidate.averageConfidence * 100)}%).`,
+			"",
+			"## Domains",
+			...candidate.domains.map((domain) => `- ${domain}`),
 			"",
 			"## Actions",
-			...candidate.instincts.map((instinct, index) => `${index + 1}. ${extractActionLine(instinct.content)}`),
+			...candidate.instincts.map((instinct) => `- ${extractActionLine(instinct.content)}`),
+			"",
+			"## Source Instincts",
+			...candidate.instincts.map(
+				(instinct) => `- ${instinct.id} [${instinct.scopeLabel}] (${Math.round(instinct.confidence * 100)}%)`,
+			),
 		].join("\n");
 		await writeTextFile(skillPath, body);
 		generated.push(skillPath);
 	}
 
 	for (const instinct of analysis.promptCandidates.slice(0, 5)) {
-		const slug = slugify(instinct.id) || "instinct-prompt";
+		const slug =
+			slugify(
+				instinct.trigger
+					.toLowerCase()
+					.replace(/^when\s+/u, "")
+					.replace(/^implementing\s+/u, "")
+					.replace(/^creating\s+/u, ""),
+			) ||
+			slugify(instinct.id) ||
+			"instinct-prompt";
 		const promptPath = join(layout.projectEvolvedPromptsDir, `${slug}.md`);
+		if (generated.includes(promptPath)) {
+			continue;
+		}
 		const body = [
-			"---",
-			`description: Evolved workflow from instinct ${instinct.id}`,
-			"---",
+			...buildFrontmatterLines([
+				["description", `Evolved workflow prompt from instinct ${instinct.id}`],
+				["evolved_from", [instinct.id]],
+			]),
+			`# ${humanizeSlug(slug) || instinct.title}`,
 			"",
-			`When handling tasks matching "${instinct.trigger}", apply this learned workflow:`,
+			`When handling tasks matching "${renderWhenClause(instinct.trigger)}", apply this workflow:`,
 			"",
-			`- ${extractActionLine(instinct.content)}`,
+			"## Steps",
+			`1. ${extractActionLine(instinct.content)}`,
+			"",
+			"## Source Instinct",
+			`- ${instinct.id} [${instinct.scopeLabel}] (${Math.round(instinct.confidence * 100)}%)`,
 		].join("\n");
 		await writeTextFile(promptPath, body);
 		generated.push(promptPath);
@@ -430,18 +529,28 @@ export async function generateEvolvedOutputs(layout: StorageLayout, analysis: Ev
 
 	for (const candidate of analysis.agentCandidates.slice(0, 3)) {
 		const slug = slugify(candidate.key) || "instinct-agent";
-		const agentPath = join(layout.projectEvolvedAgentsDir, `${slug}.md`);
+		const agentPath = join(layout.projectEvolvedAgentsDir, `${slug}-agent.md`);
 		const body = [
-			"---",
-			`name: ${slug}`,
-			`description: Evolved from ${candidate.instincts.length} instincts`,
-			"model: sonnet",
-			"---",
+			...buildFrontmatterLines([
+				["name", `${slug}-agent`],
+				["description", `Evolved from ${candidate.instincts.length} instincts about ${candidate.trigger}`],
+				["model", "sonnet"],
+				["evolved_from", candidate.instincts.map((instinct) => instinct.id)],
+			]),
+			`# ${candidate.title} Agent`,
 			"",
-			`# ${candidate.title}`,
+			`Use this agent when ${renderWhenClause(candidate.trigger)} and the task benefits from a dedicated multi-step flow.`,
+			"",
+			"## Source Domains",
+			...candidate.domains.map((domain) => `- ${domain}`),
 			"",
 			"## Source Instincts",
-			...candidate.instincts.map((instinct) => `- ${instinct.id}`),
+			...candidate.instincts.map(
+				(instinct) => `- ${instinct.id} [${instinct.scopeLabel}] (${Math.round(instinct.confidence * 100)}%)`,
+			),
+			"",
+			"## Actions",
+			...candidate.instincts.map((instinct) => `- ${extractActionLine(instinct.content)}`),
 		].join("\n");
 		await writeTextFile(agentPath, body);
 		generated.push(agentPath);

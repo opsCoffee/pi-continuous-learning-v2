@@ -128,10 +128,10 @@ With `--instincts`, it also writes repo-analysis instincts into the current proj
 
 The generation flow uses:
 
-- ECC-style git-history analysis steps from `commands/skill-create.md`
-- representative README / build config / source / test excerpts
-- a quality gate that checks overlap with existing skills, existing instincts, and MEMORY.md before saving
-- a fallback local summarizer when the active/default model cannot produce valid structured output
+- an isolated pi SDK sub-session that mirrors ECC's `/skill-create` workflow
+- restricted native tools for git-history inspection, file discovery, grep, read, and artifact saving
+- a `learn-eval`-style quality gate that checks overlap with existing skills, existing instincts, and MEMORY.md before saving
+- a generic local fallback summarizer when the active/default model cannot produce usable artifacts
 
 `/skill-create` may return these quality verdicts:
 

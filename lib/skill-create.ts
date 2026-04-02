@@ -3,37 +3,59 @@ import { readFile } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { complete, type Model, type UserMessage } from "@mariozechner/pi-ai";
-import { getAgentDir, loadSkills, parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, loadSkills, type ModelRegistry, parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { runAgenticSkillCreate } from "./agentic-skill-create.js";
 import { loadProjectOnlyInstincts, serializeInstinct } from "./instincts.js";
 import { writeTextFile } from "./storage.js";
 import type { ProjectInfo, SkillCreateQualityReport, StorageLayout } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
-const MAX_COMMIT_SAMPLES = 8;
-const MAX_SOURCE_FILES = 4;
-const MAX_TEST_FILES = 3;
-const MAX_DOC_FILES = 2;
-const MAX_FILE_CHARS = 2800;
-const MAX_README_CHARS = 5000;
+const MAX_FALLBACK_TOP_FILES = 8;
+const MAX_MANIFEST_CHARS = 6000;
 
 const NOISE_PREFIXES = [
 	".agent/",
 	".git/",
 	".pi/",
+	"node_modules/",
+	"dist/",
+	"build/",
+	"coverage/",
+	"target/",
 	"docs/superpowers/plans/",
 	"docs/plans/",
-	"target/",
-	"node_modules/",
 ];
 
 const NOISE_FILE_NAMES = new Set(["commit.log", "prompt.md", "gemini.md"]);
+const NOISE_FILE_PREFIXES = ["autoresearch"];
+const SOURCE_EXTENSIONS = new Set([
+	".ts",
+	".tsx",
+	".js",
+	".jsx",
+	".mjs",
+	".cjs",
+	".py",
+	".rb",
+	".go",
+	".rs",
+	".java",
+	".kt",
+	".kts",
+	".scala",
+	".swift",
+	".c",
+	".cc",
+	".cpp",
+	".h",
+	".hpp",
+	".cs",
+]);
 
-const SKILL_CREATE_SYSTEM_PROMPT = `You generate high-quality repository skills for a coding agent.
+const TRANSCRIPT_SYNTHESIS_SYSTEM_PROMPT = `You synthesize repository skills from a transcript of tool-assisted repository analysis.
 
-You will receive repository metadata, commit history summaries, and representative file excerpts.
-
-Return exactly two sections:
+Return exactly these sections:
 
 <skill_markdown>
 ...full SKILL.md content including frontmatter...
@@ -70,20 +92,12 @@ Return exactly two sections:
 </quality_json>
 
 Rules:
-- Focus on actual repository conventions, not meta noise
-- Ignore .agent, scratch logs, temporary planning docs, and generated clutter unless they directly shape implementation
-- Use evidence from README, build config, representative source files, tests, and repeated commit patterns
-- skillMarkdown must be a valid SKILL.md with YAML frontmatter including name and description
-- The skill should teach practical repository-specific behavior, not generic best practices
-- Prefer concise, high-signal sections over long summaries
-- If confidence is low, reduce the number of instincts instead of inventing weak ones
-
-Internal quality gate checklist:
-- Check overlap against the provided existing skills list before creating a new skill
-- Check overlap against the provided existing instincts list before creating new instincts
-- Confirm the result is reusable and not a one-off fix
-- If overlap exists, absorb/update instead of duplicating
-- Prefer Save, but if the draft is weak or redundant, improve it once internally or drop low-value instincts before output`;
+- Use only facts present in the transcript and provided metadata
+- Preserve repo specificity and avoid generic best practices
+- When generating instincts, prefer atomic, clusterable rules over broad summary instincts
+- It is acceptable for multiple instincts to share the same trigger when they represent distinct steps or checks in the same workflow
+- Prefer 4-6 concrete instincts if the repository evidence supports them; otherwise return fewer
+- If the transcript evidence is insufficient for a claim, omit it`;
 
 interface CommitEntry {
 	hash: string;
@@ -97,15 +111,17 @@ interface FileCount {
 	count: number;
 }
 
-interface FileExcerpt {
-	path: string;
-	content: string;
+interface ExistingSkillSummary {
+	name: string;
+	description: string;
+	filePath: string;
 }
 
 interface SkillCreateLlmContext {
 	model: Model<any>;
 	apiKey: string;
 	headers?: Record<string, string>;
+	modelRegistry: ModelRegistry;
 }
 
 export interface SkillCreateOptions {
@@ -122,7 +138,7 @@ export interface SkillCreateResult {
 	skillPath: string;
 	instinctPaths: string[];
 	summary: string;
-	generationMode: "LLM" | "fallback";
+	generationMode: "agentic" | "fallback";
 	llmStatus: string;
 	quality: SkillCreateQualityReport;
 	commitCount: number;
@@ -141,47 +157,96 @@ interface LlmInstinctDraft {
 	evidence: string[];
 }
 
-interface LlmSkillCreateResult {
-	skillMarkdown: string;
-	instincts: LlmInstinctDraft[];
-	quality?: Partial<SkillCreateQualityReport>;
-}
-
-interface ExistingSkillSummary {
-	name: string;
-	description: string;
-	filePath: string;
-}
-
 async function git(args: string[], cwd: string): Promise<string> {
-	const { stdout } = await execFileAsync("git", args, {
+	const result = await execFileAsync("git", args, {
 		cwd,
-		timeout: 20000,
 		maxBuffer: 8 * 1024 * 1024,
 	});
-	return stdout.trim();
+	return result.stdout.trim();
 }
 
 function isNoisePath(path: string): boolean {
-	if (NOISE_FILE_NAMES.has(basename(path))) {
+	const name = basename(path).toLowerCase();
+	if (NOISE_FILE_NAMES.has(name) || NOISE_FILE_PREFIXES.some((prefix) => name.startsWith(prefix))) {
 		return true;
 	}
 	return NOISE_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
-function isInterestingSourceFile(path: string): boolean {
-	return path.startsWith("src/main/") && (path.endsWith(".java") || path.endsWith(".kt"));
-}
-
-function isInterestingTestFile(path: string): boolean {
-	return path.startsWith("src/test/") && (path.endsWith(".java") || path.endsWith(".kt"));
-}
-
-function isInterestingDocFile(path: string): boolean {
+function isLikelyDocFile(path: string): boolean {
 	if (isNoisePath(path)) {
 		return false;
 	}
-	return path === "README.md" || path === "CHANGELOG.md" || path === "pom.xml" || path === "docs/README.md";
+	const lowered = path.toLowerCase();
+	return (
+		lowered.endsWith(".md") ||
+		lowered.endsWith(".mdx") ||
+		lowered.endsWith(".adoc") ||
+		lowered.startsWith("docs/") ||
+		lowered.includes("/docs/") ||
+		lowered === "readme" ||
+		lowered === "readme.md" ||
+		lowered === "changelog.md"
+	);
+}
+
+function isLikelyTestFile(path: string): boolean {
+	if (isNoisePath(path)) {
+		return false;
+	}
+	const lowered = path.toLowerCase();
+	return (
+		lowered.includes("/test/") ||
+		lowered.includes("/tests/") ||
+		lowered.includes("__tests__/") ||
+		lowered.endsWith(".test.ts") ||
+		lowered.endsWith(".test.tsx") ||
+		lowered.endsWith(".test.js") ||
+		lowered.endsWith(".test.jsx") ||
+		lowered.endsWith(".spec.ts") ||
+		lowered.endsWith(".spec.tsx") ||
+		lowered.endsWith(".spec.js") ||
+		lowered.endsWith(".spec.jsx") ||
+		lowered.endsWith("_test.go") ||
+		lowered.endsWith("_spec.rb") ||
+		lowered.endsWith("test.py") ||
+		lowered.endsWith("tests.py") ||
+		lowered.endsWith("test.rs") ||
+		lowered.endsWith("tests.rs")
+	);
+}
+
+function isLikelyBuildFile(path: string): boolean {
+	if (isNoisePath(path)) {
+		return false;
+	}
+	const lowered = path.toLowerCase();
+	return [
+		"package.json",
+		"pnpm-lock.yaml",
+		"yarn.lock",
+		"package-lock.json",
+		"cargo.toml",
+		"cargo.lock",
+		"pom.xml",
+		"build.gradle",
+		"build.gradle.kts",
+		"settings.gradle",
+		"settings.gradle.kts",
+		"pyproject.toml",
+		"poetry.lock",
+		"go.mod",
+		"go.sum",
+		"makefile",
+		"justfile",
+	].some((suffix) => lowered === suffix || lowered.endsWith(`/${suffix}`));
+}
+
+function isLikelySourceFile(path: string): boolean {
+	if (isNoisePath(path) || isLikelyDocFile(path) || isLikelyTestFile(path) || isLikelyBuildFile(path)) {
+		return false;
+	}
+	return SOURCE_EXTENSIONS.has(extname(path).toLowerCase());
 }
 
 async function collectGitHistory(repoRoot: string, commits: number): Promise<CommitEntry[]> {
@@ -216,12 +281,7 @@ async function collectGitHistory(repoRoot: string, commits: number): Promise<Com
 				continue;
 			}
 			const [hash, subject, date] = line.split("|", 3);
-			current = {
-				hash,
-				subject,
-				date,
-				files: [],
-			};
+			current = { hash, subject, date, files: [] };
 			continue;
 		}
 		if (line.length > 0 && !isNoisePath(line)) {
@@ -248,7 +308,27 @@ function summarizeCommitPrefixes(entries: CommitEntry[]): Array<{ prefix: string
 	return Array.from(counts.entries())
 		.map(([prefix, count]) => ({ prefix, count }))
 		.sort((left, right) => right.count - left.count)
-		.slice(0, 10);
+		.slice(0, 12);
+}
+
+function buildRecentCommitSamples(entries: CommitEntry[], limit: number): string {
+	return entries
+		.slice(0, Math.max(1, limit))
+		.map((entry) => {
+			const files = entry.files
+				.slice(0, 8)
+				.map((file) => `  - ${file}`)
+				.join("\n");
+			return `${entry.date} ${entry.subject}\n${files || "  - (no files)"}`;
+		})
+		.join("\n\n");
+}
+
+function buildFileFrequencySummary(allFiles: FileCount[], limit: number): string {
+	return allFiles
+		.slice(0, Math.max(1, limit))
+		.map((file) => `${String(file.count).padStart(4, " ")} ${file.path}`)
+		.join("\n");
 }
 
 function countFiles(entries: CommitEntry[], predicate: (path: string) => boolean): FileCount[] {
@@ -266,159 +346,54 @@ function countFiles(entries: CommitEntry[], predicate: (path: string) => boolean
 		.sort((left, right) => right.count - left.count);
 }
 
-async function readExcerpt(repoRoot: string, relativePath: string, maxChars: number): Promise<FileExcerpt | null> {
-	try {
-		const absolutePath = join(repoRoot, relativePath);
-		const content = await readFile(absolutePath, "utf-8");
-		return {
-			path: relativePath,
-			content: content.slice(0, maxChars),
-		};
-	} catch {
-		return null;
-	}
-}
-
-async function readRepresentativeFiles(
-	repoRoot: string,
-	files: FileCount[],
-	limit: number,
-	maxChars: number,
-): Promise<FileExcerpt[]> {
-	const excerpts: FileExcerpt[] = [];
-	for (const file of prioritizeFiles(files).slice(0, limit)) {
-		const excerpt = await readExcerpt(repoRoot, file.path, maxChars);
-		if (excerpt) {
-			excerpts.push(excerpt);
-		}
-	}
-	return excerpts;
-}
-
-function prioritizeFiles(files: FileCount[]): FileCount[] {
-	const score = (path: string): number => {
-		let total = 0;
-		if (path.includes("/core/")) total += 20;
-		if (path.includes("/scan/")) total += 18;
-		if (path.includes("/config/")) total += 16;
-		if (path.includes("/ui/")) total += 12;
-		if (path.includes("DetSql.java")) total += 30;
-		if (path.includes("ScannerService.java")) total += 28;
-		if (path.includes("ConfigManager.java")) total += 24;
-		if (path.includes("DetSqlUI.java")) total += 18;
-		if (path.includes("Logger")) total += 10;
-		if (path.includes("IntegrationTest")) total += 16;
-		if (path.includes("Test.java")) total += 10;
-		return total;
-	};
-
-	return [...files].sort((left, right) => {
-		const scoreDelta = score(right.path) - score(left.path);
-		if (scoreDelta !== 0) {
-			return scoreDelta;
-		}
-		return right.count - left.count;
-	});
-}
-
-function buildCommitSamples(entries: CommitEntry[]): string[] {
-	return entries.slice(0, MAX_COMMIT_SAMPLES).map((entry) => {
-		const files = entry.files.slice(0, 12);
-		return [`${entry.date} ${entry.subject}`, ...files.map((file) => `  - ${file}`)].join("\n");
-	});
-}
-
-function buildPrompt(
-	project: ProjectInfo,
-	readme: string,
-	pom: string,
-	prefixes: Array<{ prefix: string; count: number }>,
-	commitSamples: string[],
-	sourceExcerpts: FileExcerpt[],
-	testExcerpts: FileExcerpt[],
-	docExcerpts: FileExcerpt[],
-	existingSkills: ExistingSkillSummary[],
-	existingInstincts: Array<{ id: string; title: string; trigger: string; domain: string }>,
-	projectMemory: string,
-	globalMemory: string,
-): string {
-	const sections: string[] = [];
-
-	sections.push(`Repository: ${project.name}`);
-	sections.push(`Project ID: ${project.id}`);
-	if (project.remote) {
-		sections.push(`Remote: ${project.remote}`);
-	}
-
-	sections.push("\n[README]");
-	sections.push(readme || "(missing)");
-
-	sections.push("\n[BUILD CONFIG]");
-	sections.push(pom || "(missing)");
-
-	sections.push("\n[COMMIT PREFIX SUMMARY]");
-	sections.push(
-		prefixes.length > 0
-			? prefixes.map((item) => `- ${item.prefix}: ${item.count}`).join("\n")
-			: "(no stable commit prefix summary)",
-	);
-
-	sections.push("\n[RECENT COMMIT SAMPLES]");
-	sections.push(commitSamples.join("\n\n"));
-
-	const appendExcerpts = (title: string, excerpts: FileExcerpt[]) => {
-		sections.push(`\n[${title}]`);
-		if (excerpts.length === 0) {
-			sections.push("(none)");
+function buildCandidatePaths(
+	entries: CommitEntry[],
+	sourceFiles: FileCount[],
+	testFiles: FileCount[],
+	buildFiles: FileCount[],
+): string[] {
+	const candidates: string[] = [];
+	const seen = new Set<string>();
+	const add = (path: string) => {
+		if (!path || isNoisePath(path) || seen.has(path)) {
 			return;
 		}
-		for (const excerpt of excerpts) {
-			sections.push(`FILE: ${excerpt.path}`);
-			sections.push("```");
-			sections.push(excerpt.content);
-			sections.push("```");
-		}
+		seen.add(path);
+		candidates.push(path);
 	};
 
-	appendExcerpts("REPRESENTATIVE SOURCE FILES", sourceExcerpts);
-	appendExcerpts("REPRESENTATIVE TEST FILES", testExcerpts);
-	appendExcerpts("REPRESENTATIVE DOC FILES", docExcerpts);
+	for (const path of [
+		"README.md",
+		"ARCHITECTURE.md",
+		"CONTRIBUTING.md",
+		"docs/CONTRIBUTING.md",
+		"docs/ARCHITECTURE.md",
+		"AGENTS.md",
+		"Cargo.toml",
+		"package.json",
+		"pom.xml",
+		"pyproject.toml",
+		"go.mod",
+	]) {
+		add(path);
+	}
 
-	sections.push("\n[EXISTING SKILLS]");
-	sections.push(
-		existingSkills.length > 0
-			? existingSkills.map((skill) => `- ${skill.name}: ${skill.description} (${skill.filePath})`).join("\n")
-			: "(none)",
-	);
+	for (const file of buildFiles.slice(0, 8)) {
+		add(file.path);
+	}
+	for (const file of sourceFiles.slice(0, 10)) {
+		add(file.path);
+	}
+	for (const file of testFiles.slice(0, 6)) {
+		add(file.path);
+	}
+	for (const entry of entries.slice(0, 12)) {
+		for (const file of entry.files.slice(0, 6)) {
+			add(file);
+		}
+	}
 
-	sections.push("\n[EXISTING INSTINCTS]");
-	sections.push(
-		existingInstincts.length > 0
-			? existingInstincts.map((instinct) => `- ${instinct.id}: ${instinct.trigger} [${instinct.domain}]`).join("\n")
-			: "(none)",
-	);
-
-	sections.push("\n[PROJECT MEMORY]");
-	sections.push(projectMemory || "(missing)");
-
-	sections.push("\n[GLOBAL MEMORY]");
-	sections.push(globalMemory || "(missing)");
-
-	sections.push(`
-[TASK]
-Generate:
-1. a repository-specific SKILL.md that teaches the coding agent how to work in this repo
-2. up to 3 high-signal project-scoped instincts derived from repository evidence
-
-The skill should emphasize:
-- actual architecture and module boundaries
-- build/test/release workflow
-- coding and testing conventions
-- repository-specific safety rules
-
-Do not focus on meta planning files or agent scratch artifacts.`);
-
-	return sections.join("\n");
+	return candidates.slice(0, 24);
 }
 
 function extractJsonPayload(text: string): string | null {
@@ -426,10 +401,15 @@ function extractJsonPayload(text: string): string | null {
 	if (fenced) {
 		return fenced.trim();
 	}
-	const start = text.indexOf("{");
-	const end = text.lastIndexOf("}");
-	if (start >= 0 && end > start) {
-		return text.slice(start, end + 1);
+	const firstBrace = text.indexOf("{");
+	const lastBrace = text.lastIndexOf("}");
+	if (firstBrace >= 0 && lastBrace > firstBrace) {
+		return text.slice(firstBrace, lastBrace + 1);
+	}
+	const firstBracket = text.indexOf("[");
+	const lastBracket = text.lastIndexOf("]");
+	if (firstBracket >= 0 && lastBracket > firstBracket) {
+		return text.slice(firstBracket, lastBracket + 1);
 	}
 	return null;
 }
@@ -454,49 +434,53 @@ function validateQualityReport(value: unknown): Partial<SkillCreateQualityReport
 	if (!verdict) {
 		return undefined;
 	}
+	const checklist = Array.isArray(record.checklist)
+		? record.checklist.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+		: record.checklist && typeof record.checklist === "object"
+			? Object.entries(record.checklist as Record<string, unknown>)
+					.map(([key, item]) =>
+						typeof item === "string" && item.trim().length > 0 ? `${key}: ${item.trim()}` : null,
+					)
+					.filter((item): item is string => Boolean(item))
+			: [];
 	return {
 		verdict,
 		rationale: typeof record.rationale === "string" ? record.rationale.trim() : "",
-		checklist: Array.isArray(record.checklist)
-			? record.checklist.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-			: [],
+		checklist,
 		absorbTarget:
 			typeof record.absorbTarget === "string" && record.absorbTarget.trim().length > 0
 				? record.absorbTarget.trim()
 				: undefined,
 		improvements: Array.isArray(record.improvements)
 			? record.improvements.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-			: [],
+			: undefined,
 	};
 }
 
-function normalizeSkillMarkdown(markdown: string, project: ProjectInfo): string {
-	let raw = markdown.trim();
-	raw = raw.replace(/^<skill_markdown>\s*/u, "").replace(/\s*<\/skill_markdown>\s*$/u, "");
-	const instinctsSectionIndex = raw.indexOf("<instincts_json>");
-	if (instinctsSectionIndex >= 0) {
-		raw = raw.slice(0, instinctsSectionIndex).trim();
-	}
-	if (!raw) {
-		return "";
-	}
+function normalizeSkillMarkdown(raw: string, project: ProjectInfo): string {
 	const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(raw);
-	const skillName = `${project.name.toLowerCase()}-patterns`.replace(/[^a-z0-9-]+/gu, "-");
+	const lines = body.trim().length > 0 ? body.trim().split("\n") : [];
+	const skillName = `${project.name.toLowerCase().replace(/[^a-z0-9-]+/gu, "-")}-patterns`;
 	const description =
 		typeof frontmatter.description === "string" && frontmatter.description.trim().length > 0
 			? frontmatter.description.trim()
 			: `Coding patterns extracted from ${project.name}`;
-	const lines = [
+
+	const frontmatterLines = [
 		"---",
-		`name: ${skillName}`,
+		`name: ${typeof frontmatter.name === "string" && frontmatter.name.trim().length > 0 ? frontmatter.name.trim() : skillName}`,
 		`description: ${description}`,
-		"version: 1.0.0",
-		"source: local-git-analysis",
+		...(typeof frontmatter.version === "string" ? [`version: ${frontmatter.version}`] : ["version: 1.0.0"]),
+		...(typeof frontmatter.source === "string" ? [`source: ${frontmatter.source}`] : ["source: local-git-analysis"]),
 		"---",
 		"",
-		body.trim(),
 	];
-	return lines.join("\n");
+
+	if (lines.length === 0 || !lines[0]?.startsWith("# ")) {
+		lines.unshift(`# ${project.name} Patterns`, "");
+	}
+
+	return [...frontmatterLines, ...lines].join("\n").trimEnd();
 }
 
 function validateInstinctDraft(value: unknown): LlmInstinctDraft | null {
@@ -504,9 +488,18 @@ function validateInstinctDraft(value: unknown): LlmInstinctDraft | null {
 		return null;
 	}
 	const record = value as Record<string, unknown>;
-	if (typeof record.id !== "string" || typeof record.trigger !== "string" || typeof record.action !== "string") {
+	if (typeof record.id !== "string" || record.id.trim().length === 0) {
 		return null;
 	}
+	if (typeof record.trigger !== "string" || record.trigger.trim().length === 0) {
+		return null;
+	}
+	if (typeof record.action !== "string" || record.action.trim().length === 0) {
+		return null;
+	}
+	const evidence = Array.isArray(record.evidence)
+		? record.evidence.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 5)
+		: [];
 	return {
 		id: record.id.trim(),
 		title:
@@ -515,369 +508,68 @@ function validateInstinctDraft(value: unknown): LlmInstinctDraft | null {
 		confidence:
 			typeof record.confidence === "number"
 				? record.confidence
-				: Number.parseFloat(String(record.confidence ?? "0.6")),
+				: Number.parseFloat(String(record.confidence ?? "0.5")),
 		domain: typeof record.domain === "string" && record.domain.trim().length > 0 ? record.domain.trim() : "general",
 		scope: record.scope === "global" ? "global" : "project",
 		action: record.action.trim(),
-		evidence: Array.isArray(record.evidence)
-			? record.evidence
-					.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-					.slice(0, 5)
-			: [],
+		evidence,
 	};
 }
 
-function parseLlmResult(text: string, project: ProjectInfo): LlmSkillCreateResult | null {
+function parseInstinctDrafts(raw: string | undefined): LlmInstinctDraft[] {
+	if (!raw) {
+		return [];
+	}
+	const payload = extractJsonPayload(raw) ?? raw;
+	try {
+		const parsed = JSON.parse(payload) as unknown[];
+		if (!Array.isArray(parsed)) {
+			return [];
+		}
+		return parsed.map(validateInstinctDraft).filter((draft): draft is LlmInstinctDraft => Boolean(draft));
+	} catch {
+		return [];
+	}
+}
+
+function parseQualityDraft(raw: string | undefined): Partial<SkillCreateQualityReport> | undefined {
+	if (!raw) {
+		return undefined;
+	}
+	const payload = extractJsonPayload(raw) ?? raw;
+	try {
+		return validateQualityReport(JSON.parse(payload));
+	} catch {
+		return undefined;
+	}
+}
+
+function parseStructuredLlmResult(
+	text: string,
+	project: ProjectInfo,
+): {
+	skillMarkdown?: string;
+	instincts: LlmInstinctDraft[];
+	quality?: Partial<SkillCreateQualityReport>;
+} | null {
 	const taggedSkill = extractTaggedSection(text, "skill_markdown");
-	const taggedInstincts = extractTaggedSection(text, "instincts_json");
-	const taggedQuality = extractTaggedSection(text, "quality_json");
-
-	if (taggedSkill) {
-		let instincts: LlmInstinctDraft[] = [];
-		let quality: Partial<SkillCreateQualityReport> | undefined;
-		if (taggedInstincts) {
-			try {
-				const parsed = JSON.parse(taggedInstincts) as unknown[];
-				instincts = parsed.map(validateInstinctDraft).filter((draft): draft is LlmInstinctDraft => Boolean(draft));
-			} catch {}
-		}
-		if (taggedQuality) {
-			try {
-				quality = validateQualityReport(JSON.parse(taggedQuality));
-			} catch {}
-		}
-		return {
-			skillMarkdown: normalizeSkillMarkdown(taggedSkill, project),
-			instincts,
-			quality,
-		};
+	if (!taggedSkill) {
+		return null;
 	}
-
-	const payload = extractJsonPayload(text);
-	if (payload) {
-		try {
-			const parsed = JSON.parse(payload) as {
-				skillMarkdown?: unknown;
-				instincts?: unknown[];
-			};
-			if (typeof parsed.skillMarkdown === "string" && parsed.skillMarkdown.trim().length > 0) {
-				const instincts = Array.isArray(parsed.instincts)
-					? parsed.instincts
-							.map(validateInstinctDraft)
-							.filter((draft): draft is LlmInstinctDraft => Boolean(draft))
-					: [];
-				return {
-					skillMarkdown: normalizeSkillMarkdown(parsed.skillMarkdown, project),
-					instincts,
-					quality: validateQualityReport((parsed as Record<string, unknown>).quality),
-				};
-			}
-		} catch {}
-	}
-
-	if (text.includes("---") && text.includes("# ")) {
-		return {
-			skillMarkdown: normalizeSkillMarkdown(text, project),
-			instincts: [],
-		};
-	}
-	return null;
-}
-
-function buildFallbackSkillMarkdown(
-	project: ProjectInfo,
-	prefixes: Array<{ prefix: string; count: number }>,
-	sourceFiles: FileCount[],
-	testFiles: FileCount[],
-	entries: CommitEntry[],
-	readme: string,
-	pom: string,
-): string {
-	const skillName = `${project.name.toLowerCase()}-patterns`.replace(/[^a-z0-9-]+/gu, "-");
-	const architectureLines = summarizeArchitecture(sourceFiles);
-	const workflowLines = summarizeWorkflows(entries);
-	const testingLines = summarizeTestingPatterns(testFiles);
-	const buildLines = summarizeBuildConventions(readme, pom);
-	return [
-		"---",
-		`name: ${skillName}`,
-		`description: Coding patterns extracted from ${project.name}`,
-		"version: 1.0.0",
-		"source: local-git-analysis",
-		"---",
-		"",
-		`# ${project.name} Patterns`,
-		"",
-		"## Commit Conventions",
-		...(prefixes.length > 0
-			? prefixes.map((item) => `- \`${item.prefix}:\` 提交前缀高频出现 ${item.count} 次`)
-			: ["- 未检测到稳定的提交前缀约定。"]),
-		"",
-		"## Build And Runtime",
-		...buildLines,
-		"",
-		"## Code Architecture",
-		...architectureLines,
-		"",
-		"## Workflows",
-		...workflowLines,
-		"",
-		"## Testing Patterns",
-		...testingLines,
-	].join("\n");
-}
-
-function summarizeBuildConventions(readme: string, pom: string): string[] {
-	const lines: string[] = [];
-	if (pom.includes("<java.version>17</java.version>")) {
-		lines.push("- 构建与运行环境基于 Java 17。");
-	}
-	if (pom.includes("<artifactId>maven-shade-plugin</artifactId>")) {
-		lines.push("- 使用 Maven Shade 产出单一可分发 JAR。");
-	}
-	if (pom.includes("<artifactId>jacoco-maven-plugin</artifactId>")) {
-		lines.push("- 通过 JaCoCo 维护覆盖率门槛。");
-	}
-	if (pom.includes("<artifactId>dependency-check-maven</artifactId>")) {
-		lines.push("- 依赖安全扫描通过 OWASP Dependency-Check 按需执行。");
-	}
-	if (pom.includes("montoya-api") || readme.includes("Montoya API")) {
-		lines.push("- Burp 扩展开发统一基于 Montoya API，而非旧 Extender API。");
-	}
-	if (lines.length === 0) {
-		lines.push("- 构建约定需以仓库当前 build 配置为准。");
-	}
-	return lines;
-}
-
-function summarizeArchitecture(sourceFiles: FileCount[]): string[] {
-	const moduleDescriptions = new Map<string, string>([
-		["core", "扩展生命周期、调度、归档、回调安全与主流程协调"],
-		["scan", "扫描入口、插入点与扫描服务编排"],
-		["injection", "各类注入策略及策略管理"],
-		["config", "配置模型、Schema、默认值与设置面板工厂"],
-		["ui", "Burp 面板、标签页、绑定与界面辅助"],
-		["util", "字符串、响应分析、签名与通用工具"],
-		["events", "事件总线与异步事件传播"],
-		["logging", "统一日志与日志级别控制"],
-		["model", "表格模型与归档模型"],
-	]);
-
-	const modules = new Map<string, number>();
-	for (const file of sourceFiles) {
-		const match = file.path.match(/^src\/main\/java\/DetSql\/([^/]+)\//u);
-		if (!match) {
-			continue;
-		}
-		const moduleName = match[1];
-		modules.set(moduleName, (modules.get(moduleName) ?? 0) + file.count);
-	}
-
-	const lines = Array.from(modules.entries())
-		.sort((left, right) => right[1] - left[1])
-		.slice(0, 8)
-		.map(([moduleName]) => {
-			const description = moduleDescriptions.get(moduleName) ?? "仓库中的一个稳定模块边界";
-			return `- \`${moduleName}/\`：${description}。`;
-		});
-
-	return lines.length > 0 ? lines : ["- 暂未提炼出稳定源码结构。"];
-}
-
-function summarizeWorkflows(entries: CommitEntry[]): string[] {
-	let scanAndTest = 0;
-	let configAndUi = 0;
-	let docsAndAgent = 0;
-
-	for (const entry of entries) {
-		const hasScan = entry.files.some((file) => file.startsWith("src/main/java/DetSql/scan/"));
-		const hasCore = entry.files.some((file) => file.startsWith("src/main/java/DetSql/core/"));
-		const hasConfig = entry.files.some((file) => file.startsWith("src/main/java/DetSql/config/"));
-		const hasUi = entry.files.some((file) => file.startsWith("src/main/java/DetSql/ui/"));
-		const hasTests = entry.files.some((file) => file.startsWith("src/test/java/"));
-		const hasAgent = entry.files.some((file) => file.startsWith(".agent/"));
-		const hasDocs = entry.files.some(
-			(file) => file.startsWith("docs/") || file === "README.md" || file === "CHANGELOG.md",
-		);
-
-		if ((hasScan || hasCore) && hasTests) {
-			scanAndTest++;
-		}
-		if (hasConfig && hasUi) {
-			configAndUi++;
-		}
-		if (hasDocs && hasAgent) {
-			docsAndAgent++;
-		}
-	}
-
-	const lines: string[] = [];
-	if (scanAndTest >= 2) {
-		lines.push("- 修改扫描核心或主流程时，通常会同步补充集成测试/回归测试。");
-	}
-	if (configAndUi >= 2) {
-		lines.push("- 调整配置模型时，通常会同时更新设置面板或 UI 行为。");
-	}
-	if (docsAndAgent >= 2) {
-		lines.push("- 较大改动往往伴随 `.agent/` 记录与文档更新。");
-	}
-	return lines.length > 0 ? lines : ["- 暂未发现稳定的提交级工作流。"];
-}
-
-function summarizeTestingPatterns(testFiles: FileCount[]): string[] {
-	const hasIntegration = testFiles.some((file) => file.path.includes("IntegrationTest"));
-	const hasConcurrency = testFiles.some(
-		(file) => file.path.includes("Concurrency") || file.path.includes("Backpressure"),
-	);
-	const hasConfig = testFiles.some((file) => file.path.includes("/config/"));
-	const hasUi = testFiles.some((file) => file.path.includes("/ui/"));
-	const lines: string[] = [];
-
-	if (hasIntegration) {
-		lines.push("- 测试不仅覆盖单元测试，还大量使用 `*IntegrationTest` 验证流程级行为。");
-	}
-	if (hasConcurrency) {
-		lines.push("- 并发、背压和事件时序是重点回归面，相关测试命名明确。");
-	}
-	if (hasConfig) {
-		lines.push("- 配置兼容、保存与加载路径有独立测试覆盖。");
-	}
-	if (hasUi) {
-		lines.push("- UI 行为和设置面板也有专门测试，而不是只测核心逻辑。");
-	}
-	if (lines.length === 0) {
-		lines.push("- 暂未提炼出稳定测试结构。");
-	}
-	return lines;
-}
-
-function buildFallbackInstincts(
-	project: ProjectInfo,
-	prefixes: Array<{ prefix: string; count: number }>,
-	testFiles: FileCount[],
-): LlmInstinctDraft[] {
-	const repoSlug = project.name.toLowerCase().replace(/[^a-z0-9-]+/gu, "-");
-	const instincts: LlmInstinctDraft[] = [];
-
-	if (prefixes.length > 0) {
-		instincts.push({
-			id: `${repoSlug}-commit-convention`,
-			title: "Use Repository Commit Convention",
-			trigger: "when writing a commit message",
-			confidence: 0.8,
-			domain: "git",
-			scope: "project",
-			action: "优先沿用仓库中高频出现的约定式提交前缀。",
-			evidence: prefixes.slice(0, 4).map((item) => `提交前缀 ${item.prefix}: 出现 ${item.count} 次`),
-		});
-	}
-
-	if (testFiles.length > 0) {
-		instincts.push({
-			id: `${repoSlug}-test-conventions`,
-			title: "Follow Repository Test Conventions",
-			trigger: "when adding or modifying tests",
-			confidence: 0.7,
-			domain: "testing",
-			scope: "project",
-			action: "测试文件优先沿用仓库现有目录结构和命名风格。",
-			evidence: testFiles.slice(0, 4).map((file) => `高频测试文件 ${file.path}（${file.count} 次）`),
-		});
-	}
-
-	return instincts;
-}
-
-function normalizeForCompare(value: string): string {
-	return value
-		.toLowerCase()
-		.replace(/[^a-z0-9\u4e00-\u9fff]+/gu, " ")
-		.trim();
-}
-
-function tokenize(value: string): Set<string> {
-	return new Set(
-		normalizeForCompare(value)
-			.split(/\s+/u)
-			.filter((token) => token.length > 1),
-	);
-}
-
-function overlapScore(left: string, right: string): number {
-	const leftTokens = tokenize(left);
-	const rightTokens = tokenize(right);
-	if (leftTokens.size === 0 || rightTokens.size === 0) {
-		return 0;
-	}
-	let intersection = 0;
-	for (const token of leftTokens) {
-		if (rightTokens.has(token)) {
-			intersection++;
-		}
-	}
-	return intersection / Math.max(leftTokens.size, rightTokens.size);
-}
-
-function dedupeInstinctDrafts(
-	drafts: LlmInstinctDraft[],
-	existingInstincts: Array<{ id: string; title: string; trigger: string; domain: string }>,
-): { drafts: LlmInstinctDraft[]; droppedIds: string[] } {
-	const sorted = [...drafts].sort(
-		(left, right) => right.confidence - left.confidence || right.action.length - left.action.length,
-	);
-	const kept: LlmInstinctDraft[] = [];
-	const droppedIds: string[] = [];
-
-	for (const draft of sorted) {
-		if (draft.confidence < 0.65) {
-			droppedIds.push(draft.id);
-			continue;
-		}
-
-		const genericAction = normalizeForCompare(draft.action);
-		const genericTitle = normalizeForCompare(draft.title);
-		const hasOverlapWithExisting = existingInstincts.some((existing) => {
-			if (existing.id === draft.id) {
-				return true;
-			}
-			if (existing.domain !== draft.domain) {
-				return false;
-			}
-			return (
-				overlapScore(existing.trigger, draft.trigger) >= 0.6 ||
-				overlapScore(existing.title, draft.title) >= 0.6 ||
-				overlapScore(existing.trigger, genericAction) >= 0.6 ||
-				overlapScore(existing.title, genericAction) >= 0.6
-			);
-		});
-		if (hasOverlapWithExisting) {
-			droppedIds.push(draft.id);
-			continue;
-		}
-
-		const hasOverlapWithKept = kept.some((existing) => {
-			if (existing.domain !== draft.domain) {
-				return false;
-			}
-			return (
-				overlapScore(existing.trigger, draft.trigger) >= 0.6 ||
-				overlapScore(existing.title, draft.title) >= 0.6 ||
-				overlapScore(existing.action, genericAction) >= 0.65 ||
-				overlapScore(existing.action, genericTitle) >= 0.65
-			);
-		});
-		if (hasOverlapWithKept) {
-			droppedIds.push(draft.id);
-			continue;
-		}
-
-		kept.push(draft);
-	}
-
 	return {
-		drafts: kept.slice(0, 3),
-		droppedIds,
+		skillMarkdown: normalizeSkillMarkdown(taggedSkill, project),
+		instincts: parseInstinctDrafts(extractTaggedSection(text, "instincts_json") ?? undefined),
+		quality: parseQualityDraft(extractTaggedSection(text, "quality_json") ?? undefined),
 	};
+}
+
+async function readOptionalText(filePath: string, maxChars: number): Promise<string> {
+	try {
+		const content = await readFile(filePath, "utf-8");
+		return content.slice(0, maxChars);
+	} catch {
+		return "";
+	}
 }
 
 async function loadExistingSkills(projectRoot: string, outputSkillPath: string): Promise<ExistingSkillSummary[]> {
@@ -891,16 +583,321 @@ async function loadExistingSkills(projectRoot: string, outputSkillPath: string):
 		}));
 }
 
-async function readOptionalText(filePath: string, maxChars: number): Promise<string> {
-	try {
-		const content = await readFile(filePath, "utf-8");
-		return content.slice(0, maxChars);
-	} catch {
-		return "";
+function summarizeTopAreas(allFiles: FileCount[]): string[] {
+	const areas = new Map<string, number>();
+	for (const file of allFiles) {
+		const segments = file.path.split("/");
+		const key =
+			segments[0] === "crates" || segments[0] === "packages"
+				? segments.slice(0, 2).join("/")
+				: segments[0] === ".github"
+					? ".github"
+					: (segments[0] ?? file.path);
+		if (!key) {
+			continue;
+		}
+		areas.set(key, (areas.get(key) ?? 0) + file.count);
 	}
+	const lines = Array.from(areas.entries())
+		.sort((left, right) => right[1] - left[1])
+		.slice(0, MAX_FALLBACK_TOP_FILES)
+		.map(([area, count]) => `- \`${area}\` 是高频变更区域（${count} 次），通常值得优先理解其职责边界。`);
+	return lines.length > 0 ? lines : ["- 暂未提炼出稳定的高频目录区域。"];
+}
+
+function summarizeBuildSurface(manifests: Record<string, string>, allFiles: FileCount[]): string[] {
+	const lines: string[] = [];
+	if (manifests["Cargo.toml"]) {
+		lines.push("- 仓库包含 `Cargo.toml`，构建与依赖约束应优先从 Cargo/Rust workspace 结构中确认。");
+		if (manifests["Cargo.toml"].includes("[workspace]")) {
+			lines.push("- 根 `Cargo.toml` 启用了 workspace，跨 crate 的边界和依赖关系应按 workspace 组织来理解。");
+		}
+	}
+	if (manifests["package.json"]) {
+		lines.push("- 仓库包含 `package.json`，前端/Node 工作流应以 package scripts 和 lockfile 为准。");
+		if (manifests["package.json"].includes('"workspaces"')) {
+			lines.push("- `package.json` 启用了 workspaces，改动时需要考虑多包联动。");
+		}
+	}
+	if (manifests["pom.xml"]) {
+		lines.push("- 仓库包含 `pom.xml`，Java 构建、测试和打包步骤应以 Maven 配置为准。");
+	}
+	if (manifests["pyproject.toml"]) {
+		lines.push("- 仓库包含 `pyproject.toml`，Python 构建、依赖和工具链配置以该文件为准。");
+	}
+	if (manifests["go.mod"]) {
+		lines.push("- 仓库包含 `go.mod`，Go 模块边界和依赖版本需遵守模块声明。");
+	}
+	const buildFiles = allFiles.filter((file) => isLikelyBuildFile(file.path)).slice(0, 5);
+	if (buildFiles.length > 0) {
+		lines.push(`- 高频构建/配置文件包括：${buildFiles.map((file) => `\`${file.path}\``).join("、")}。`);
+	}
+	if (lines.length === 0) {
+		lines.push("- 构建与配置约定需以仓库中的 manifest、lockfile 和 CI 配置为准。");
+	}
+	return lines;
+}
+
+function summarizeWorkflows(entries: CommitEntry[]): string[] {
+	let sourceAndTests = 0;
+	let sourceAndDocs = 0;
+	let sourceAndBuild = 0;
+
+	for (const entry of entries) {
+		const hasSource = entry.files.some((file) => isLikelySourceFile(file));
+		const hasTests = entry.files.some((file) => isLikelyTestFile(file));
+		const hasDocs = entry.files.some((file) => isLikelyDocFile(file));
+		const hasBuild = entry.files.some((file) => isLikelyBuildFile(file));
+
+		if (hasSource && hasTests) {
+			sourceAndTests++;
+		}
+		if (hasSource && hasDocs) {
+			sourceAndDocs++;
+		}
+		if (hasSource && hasBuild) {
+			sourceAndBuild++;
+		}
+	}
+
+	const lines: string[] = [];
+	if (sourceAndTests >= 2) {
+		lines.push("- 代码改动经常与测试一起提交，新增或重构实现时应同步补测试或更新测试夹具。");
+	}
+	if (sourceAndDocs >= 2) {
+		lines.push("- 影响外部行为或重要设计的改动通常会伴随 README / docs 更新。");
+	}
+	if (sourceAndBuild >= 2) {
+		lines.push("- 变更核心实现时，往往需要同步检查 manifest、脚本或构建配置。");
+	}
+	return lines.length > 0 ? lines : ["- 暂未检测到足够稳定的提交流程信号。"];
+}
+
+function summarizeTestingPatterns(testFiles: FileCount[]): string[] {
+	if (testFiles.length === 0) {
+		return ["- 暂未从 git 历史中观察到稳定的测试文件模式。"];
+	}
+	const lines: string[] = [];
+	if (testFiles.some((file) => file.path.includes("__tests__/"))) {
+		lines.push("- 测试中使用 `__tests__/` 目录组织用例。");
+	}
+	if (testFiles.some((file) => file.path.endsWith(".test.ts") || file.path.endsWith(".test.js"))) {
+		lines.push("- JavaScript / TypeScript 测试常用 `.test.*` 后缀。");
+	}
+	if (testFiles.some((file) => file.path.endsWith(".spec.ts") || file.path.endsWith(".spec.js"))) {
+		lines.push("- 部分测试文件采用 `.spec.*` 命名。");
+	}
+	if (testFiles.some((file) => file.path.endsWith("_test.go"))) {
+		lines.push("- Go 测试遵循 `_test.go` 约定。");
+	}
+	if (testFiles.some((file) => file.path.includes("/tests/") || file.path.includes("/test/"))) {
+		lines.push("- 测试主要位于 `test/` 或 `tests/` 目录。");
+	}
+	lines.push(
+		`- 高频测试文件包括：${testFiles
+			.slice(0, 5)
+			.map((file) => `\`${file.path}\``)
+			.join("、")}。`,
+	);
+	return lines;
+}
+
+function buildFallbackSkillMarkdown(
+	project: ProjectInfo,
+	prefixes: Array<{ prefix: string; count: number }>,
+	allFiles: FileCount[],
+	testFiles: FileCount[],
+	entries: CommitEntry[],
+	manifests: Record<string, string>,
+): string {
+	const skillName = `${project.name.toLowerCase().replace(/[^a-z0-9-]+/gu, "-")}-patterns`;
+	const prefixLines =
+		prefixes.length > 0
+			? prefixes.map((item) => `- \`${item.prefix}:\` 是高频提交前缀（${item.count} 次）。`)
+			: ["- 未检测到稳定的提交前缀约定。"];
+	return [
+		"---",
+		`name: ${skillName}`,
+		`description: Coding patterns extracted from ${project.name}`,
+		"version: 1.0.0",
+		"source: local-git-analysis",
+		"---",
+		"",
+		`# ${project.name} Patterns`,
+		"",
+		"## Commit Conventions",
+		...prefixLines,
+		"",
+		"## Code Architecture",
+		...summarizeTopAreas(allFiles),
+		"",
+		"## Build And Runtime",
+		...summarizeBuildSurface(manifests, allFiles),
+		"",
+		"## Workflows",
+		...summarizeWorkflows(entries),
+		"",
+		"## Testing Patterns",
+		...summarizeTestingPatterns(testFiles),
+	].join("\n");
+}
+
+function buildFallbackInstincts(
+	project: ProjectInfo,
+	prefixes: Array<{ prefix: string; count: number }>,
+	testFiles: FileCount[],
+	buildFiles: FileCount[],
+): LlmInstinctDraft[] {
+	const repoSlug = project.name.toLowerCase().replace(/[^a-z0-9-]+/gu, "-");
+	const drafts: LlmInstinctDraft[] = [];
+	if (prefixes.length > 0) {
+		drafts.push({
+			id: `${repoSlug}-commit-convention`,
+			title: "Follow Repository Commit Convention",
+			trigger: "when writing a commit message",
+			confidence: 0.8,
+			domain: "git",
+			scope: "project",
+			action: "优先沿用仓库里高频出现的提交前缀和命名风格。",
+			evidence: prefixes.slice(0, 5).map((item) => `提交前缀 ${item.prefix}: 出现 ${item.count} 次`),
+		});
+	}
+	if (testFiles.length > 0) {
+		drafts.push({
+			id: `${repoSlug}-test-layout`,
+			title: "Follow Repository Test Layout",
+			trigger: "when adding or changing tests",
+			confidence: 0.72,
+			domain: "testing",
+			scope: "project",
+			action: "测试文件优先沿用仓库现有目录与命名模式，而不是自创新布局。",
+			evidence: testFiles.slice(0, 4).map((file) => `高频测试路径 ${file.path}（${file.count} 次）`),
+		});
+		drafts.push({
+			id: `${repoSlug}-test-fixture-reuse`,
+			title: "Reuse Existing Test Fixtures",
+			trigger: "when adding or changing tests",
+			confidence: 0.7,
+			domain: "testing",
+			scope: "project",
+			action: "优先复用仓库已有测试夹具、样例数据和共享测试工具，而不是临时发明一套新夹具。",
+			evidence: testFiles.slice(0, 4).map((file) => `测试相关路径 ${file.path}（${file.count} 次）`),
+		});
+	}
+	if (buildFiles.length > 0) {
+		drafts.push({
+			id: `${repoSlug}-build-manifest-awareness`,
+			title: "Respect Workspace Build Manifests",
+			trigger: "when changing workspace manifests",
+			confidence: 0.68,
+			domain: "workflow",
+			scope: "project",
+			action: "涉及构建和模块边界的改动前，先核对仓库的 manifest、lockfile 和构建脚本。",
+			evidence: buildFiles.slice(0, 4).map((file) => `高频构建文件 ${file.path}（${file.count} 次）`),
+		});
+		drafts.push({
+			id: `${repoSlug}-workspace-version-inheritance`,
+			title: "Keep Workspace Version Inheritance",
+			trigger: "when changing workspace manifests",
+			confidence: 0.66,
+			domain: "workflow",
+			scope: "project",
+			action: "改动 workspace 或子模块依赖时，优先延续仓库现有的统一版本继承方式，而不是在局部单独钉版本。",
+			evidence: buildFiles.slice(0, 4).map((file) => `相关 manifest ${file.path}（${file.count} 次）`),
+		});
+	}
+	return drafts.slice(0, 6);
+}
+
+function normalizeForCompare(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/[`*_>#-]/gu, " ")
+		.replace(/\s+/gu, " ")
+		.trim();
+}
+
+function tokenize(value: string): Set<string> {
+	return new Set(
+		normalizeForCompare(value)
+			.split(" ")
+			.filter((token) => token.length >= 3),
+	);
+}
+
+function isRepoSpecificSkill(project: ProjectInfo, skillMarkdown: string): boolean {
+	return normalizeForCompare(skillMarkdown).includes(normalizeForCompare(project.name));
+}
+
+function overlapScore(left: string, right: string): number {
+	const leftTokens = tokenize(left);
+	const rightTokens = tokenize(right);
+	if (leftTokens.size === 0 || rightTokens.size === 0) {
+		return 0;
+	}
+	let overlap = 0;
+	for (const token of leftTokens) {
+		if (rightTokens.has(token)) {
+			overlap++;
+		}
+	}
+	return overlap / Math.min(leftTokens.size, rightTokens.size);
+}
+
+function dedupeInstinctDrafts(
+	drafts: LlmInstinctDraft[],
+	existingInstincts: Array<{ id: string; title: string; trigger: string; domain: string; action?: string }>,
+): { drafts: LlmInstinctDraft[]; droppedIds: string[] } {
+	const kept: LlmInstinctDraft[] = [];
+	const droppedIds: string[] = [];
+
+	for (const draft of drafts) {
+		const overlapsExisting = existingInstincts.some((instinct) => {
+			if (instinct.id === draft.id) {
+				return false;
+			}
+			const triggerScore = overlapScore(instinct.trigger, draft.trigger);
+			const actionScore = overlapScore(instinct.action ?? "", draft.action);
+			const overallScore = overlapScore(
+				`${instinct.title} ${instinct.trigger} ${instinct.action ?? ""}`,
+				`${draft.title} ${draft.trigger} ${draft.action}`,
+			);
+			if (triggerScore >= 0.8 && actionScore < 0.45) {
+				return false;
+			}
+			return overallScore >= 0.68 || (triggerScore >= 0.8 && actionScore >= 0.45);
+		});
+		if (overlapsExisting) {
+			droppedIds.push(draft.id);
+			continue;
+		}
+		const overlapsKept = kept.some((instinct) => {
+			if (instinct.id === draft.id) {
+				return false;
+			}
+			const triggerScore = overlapScore(instinct.trigger, draft.trigger);
+			const actionScore = overlapScore(instinct.action, draft.action);
+			const overallScore = overlapScore(
+				`${instinct.title} ${instinct.trigger} ${instinct.action}`,
+				`${draft.title} ${draft.trigger} ${draft.action}`,
+			);
+			if (triggerScore >= 0.8 && actionScore < 0.45) {
+				return false;
+			}
+			return overallScore >= 0.68 || (triggerScore >= 0.8 && actionScore >= 0.45);
+		});
+		if (overlapsKept) {
+			droppedIds.push(draft.id);
+			continue;
+		}
+		kept.push(draft);
+	}
+
+	return { drafts: kept.slice(0, 6), droppedIds };
 }
 
 function buildQualityReport(
+	project: ProjectInfo,
 	skillMarkdown: string,
 	existingSkills: ExistingSkillSummary[],
 	droppedInstinctIds: string[],
@@ -909,8 +906,21 @@ function buildQualityReport(
 	llmQuality?: Partial<SkillCreateQualityReport>,
 ): SkillCreateQualityReport {
 	const headingCount = (skillMarkdown.match(/^## /gmu) ?? []).length;
+	const projectSpecific = isRepoSpecificSkill(project, skillMarkdown);
+	const projectToken = normalizeForCompare(project.name);
 	const overlapSkills = existingSkills
-		.filter((skill) => overlapScore(skillMarkdown, `${skill.name} ${skill.description}`) >= 0.35)
+		.filter((skill) => {
+			const score = overlapScore(skillMarkdown, `${skill.name} ${skill.description}`);
+			if (score < 0.35) {
+				return false;
+			}
+			const isProjectLocal = skill.filePath.startsWith(project.root);
+			if (!projectSpecific || isProjectLocal) {
+				return true;
+			}
+			const existingIdentity = normalizeForCompare(`${skill.name} ${skill.description}`);
+			return existingIdentity.includes(projectToken);
+		})
 		.map((skill) => skill.filePath)
 		.slice(0, 3);
 	const memoryOverlap =
@@ -944,13 +954,13 @@ function buildQualityReport(
 	} else if (headingCount < 3) {
 		verdict = "improve-then-save";
 		rationale = "技能结构偏薄，但仍具有可保存价值。";
-		improvements = ["补充更多具体的模块边界、命令和测试约束"];
+		improvements = ["补充更具体的仓库边界、命令约定和触发条件"];
 	}
 
 	return {
 		verdict,
 		rationale,
-		checklist,
+		checklist: llmQuality?.checklist && llmQuality.checklist.length > 0 ? llmQuality.checklist : checklist,
 		overlapSkills,
 		droppedInstinctIds,
 		absorbTarget,
@@ -973,6 +983,94 @@ function buildAbsorbContent(skillMarkdown: string, absorbTarget: string | undefi
 		...body.split("\n").map((line) => `+ ${line}`),
 		"```",
 	].join("\n");
+}
+
+async function synthesizeFromTranscript(
+	project: ProjectInfo,
+	llm: SkillCreateLlmContext,
+	transcript: string,
+	existingSkills: ExistingSkillSummary[],
+	existingInstincts: Array<{ id: string; title: string; trigger: string; domain: string }>,
+	projectMemory: string,
+	globalMemory: string,
+	includeInstincts: boolean,
+): Promise<{
+	skillMarkdown?: string;
+	instincts: LlmInstinctDraft[];
+	quality?: Partial<SkillCreateQualityReport>;
+	status: string;
+}> {
+	const userMessage: UserMessage = {
+		role: "user",
+		content: [
+			{
+				type: "text",
+				text: [
+					`Repository: ${project.name}`,
+					project.remote ? `Remote: ${project.remote}` : "Remote: none",
+					`Generate instincts: ${includeInstincts ? "yes" : "no"}`,
+					"",
+					"[EXISTING SKILLS]",
+					existingSkills.length > 0
+						? existingSkills
+								.map((skill) => `- ${skill.name}: ${skill.description} (${skill.filePath})`)
+								.join("\n")
+						: "(none)",
+					"",
+					"[EXISTING INSTINCTS]",
+					existingInstincts.length > 0
+						? existingInstincts
+								.map((instinct) => `- ${instinct.id}: ${instinct.trigger} [${instinct.domain}]`)
+								.join("\n")
+						: "(none)",
+					"",
+					"[PROJECT MEMORY]",
+					projectMemory || "(missing)",
+					"",
+					"[GLOBAL MEMORY]",
+					globalMemory || "(missing)",
+					"",
+					"[TRANSCRIPT]",
+					transcript,
+					"",
+					"[TASK]",
+					"Use the transcript above as the sole evidence source.",
+					"Produce a repository-specific skill, optional project instincts, and a learn-eval style quality report.",
+					includeInstincts
+						? "You may produce up to 6 instincts. Prefer atomic instincts that can cluster into future skills."
+						: "Return an empty instincts_json array.",
+				].join("\n"),
+			},
+		],
+		timestamp: Date.now(),
+	};
+
+	try {
+		const response = await complete(
+			llm.model,
+			{
+				systemPrompt: TRANSCRIPT_SYNTHESIS_SYSTEM_PROMPT,
+				messages: [userMessage],
+			},
+			{
+				apiKey: llm.apiKey,
+				headers: llm.headers,
+				maxTokens: 4096,
+				signal: AbortSignal.timeout(60_000),
+			},
+		);
+		const text = response.content
+			.filter((item): item is { type: "text"; text: string } => item.type === "text")
+			.map((item) => item.text)
+			.join("\n");
+		const parsed = parseStructuredLlmResult(text, project);
+		return parsed ? { ...parsed, status: "success" } : { instincts: [], status: "parse-failed" };
+	} catch (error) {
+		return {
+			instincts: [],
+			status: `error:${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
 }
 
 async function improveSkillWithLlm(
@@ -1019,7 +1117,7 @@ async function improveSkillWithLlm(
 				apiKey: llm.apiKey,
 				headers: llm.headers,
 				maxTokens: 4096,
-				signal: AbortSignal.timeout(60000),
+				signal: AbortSignal.timeout(60_000),
 			},
 		);
 		const text = response.content
@@ -1078,47 +1176,6 @@ function resolveSkillOutputPath(project: ProjectInfo, layout: StorageLayout, out
 	return join(resolvedOutput, skillDirName, "SKILL.md");
 }
 
-async function generateWithLlm(
-	project: ProjectInfo,
-	llm: SkillCreateLlmContext,
-	prompt: string,
-): Promise<{ result: LlmSkillCreateResult | null; status: string }> {
-	const userMessage: UserMessage = {
-		role: "user",
-		content: [{ type: "text", text: prompt }],
-		timestamp: Date.now(),
-	};
-	try {
-		const response = await complete(
-			llm.model,
-			{
-				systemPrompt: SKILL_CREATE_SYSTEM_PROMPT,
-				messages: [userMessage],
-			},
-			{
-				apiKey: llm.apiKey,
-				headers: llm.headers,
-				maxTokens: 4096,
-				signal: AbortSignal.timeout(60000),
-			},
-		);
-		const text = response.content
-			.filter((item): item is { type: "text"; text: string } => item.type === "text")
-			.map((item) => item.text)
-			.join("\n");
-		const parsed = parseLlmResult(text, project);
-		return {
-			result: parsed,
-			status: parsed ? "success" : "parse-failed",
-		};
-	} catch (error) {
-		return {
-			result: null,
-			status: `error:${error instanceof Error ? error.message : String(error)}`,
-		};
-	}
-}
-
 export async function createSkillFromRepository(options: SkillCreateOptions): Promise<SkillCreateResult> {
 	const repoRoot = await git(["-C", options.project.root, "rev-parse", "--show-toplevel"], options.cwd);
 	const entries = await collectGitHistory(repoRoot, options.commits);
@@ -1127,69 +1184,111 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 	}
 
 	const prefixes = summarizeCommitPrefixes(entries);
-	const sourceFiles = countFiles(entries, isInterestingSourceFile);
-	const testFiles = countFiles(entries, isInterestingTestFile);
-	const docFiles = countFiles(entries, isInterestingDocFile);
-
-	const readmeExcerpt = (await readExcerpt(repoRoot, "README.md", MAX_README_CHARS))?.content ?? "";
-	const pomExcerpt = (await readExcerpt(repoRoot, "pom.xml", MAX_FILE_CHARS))?.content ?? "";
-	const sourceExcerpts = await readRepresentativeFiles(repoRoot, sourceFiles, MAX_SOURCE_FILES, MAX_FILE_CHARS);
-	const testExcerpts = await readRepresentativeFiles(repoRoot, testFiles, MAX_TEST_FILES, MAX_FILE_CHARS);
-	const docExcerpts = await readRepresentativeFiles(repoRoot, docFiles, MAX_DOC_FILES, MAX_FILE_CHARS);
-	const commitSamples = buildCommitSamples(entries).slice(0, MAX_COMMIT_SAMPLES);
+	const allFiles = countFiles(entries, (path) => !isNoisePath(path));
+	const sourceFiles = countFiles(entries, isLikelySourceFile);
+	const testFiles = countFiles(entries, isLikelyTestFile);
+	const buildFiles = countFiles(entries, isLikelyBuildFile);
+	const candidatePaths = buildCandidatePaths(entries, sourceFiles, testFiles, buildFiles);
 	const skillPath = resolveSkillOutputPath(options.project, options.layout, options.output);
 	const existingSkills = await loadExistingSkills(repoRoot, skillPath);
 	const existingInstincts = await loadProjectOnlyInstincts(options.layout);
-	const projectMemory = (
-		(await readOptionalText(join(repoRoot, ".pi", "MEMORY.md"), 4000)) ||
-		(await readOptionalText(join(repoRoot, "MEMORY.md"), 4000))
-	).trim();
-	const globalMemory = (await readOptionalText(join(getAgentDir(), "MEMORY.md"), 4000)).trim();
+	const projectMemoryPath =
+		(await readOptionalText(join(repoRoot, ".pi", "MEMORY.md"), 1)).length > 0
+			? join(repoRoot, ".pi", "MEMORY.md")
+			: (await readOptionalText(join(repoRoot, "MEMORY.md"), 1)).length > 0
+				? join(repoRoot, "MEMORY.md")
+				: undefined;
+	const globalMemoryPath =
+		(await readOptionalText(join(getAgentDir(), "MEMORY.md"), 1)).length > 0
+			? join(getAgentDir(), "MEMORY.md")
+			: undefined;
+	const projectMemory = projectMemoryPath ? (await readOptionalText(projectMemoryPath, 4000)).trim() : "";
+	const globalMemory = globalMemoryPath ? (await readOptionalText(globalMemoryPath, 4000)).trim() : "";
 
-	let llmResult: LlmSkillCreateResult | null = null;
+	const manifests: Record<string, string> = {};
+	for (const fileName of ["Cargo.toml", "package.json", "pom.xml", "pyproject.toml", "go.mod", "README.md"]) {
+		const content = await readOptionalText(join(repoRoot, fileName), MAX_MANIFEST_CHARS);
+		if (content.length > 0) {
+			manifests[fileName] = content;
+		}
+	}
+
+	let generationMode: SkillCreateResult["generationMode"] = "fallback";
 	let llmStatus = "not-used";
+	let agenticSkillMarkdown: string | undefined;
+	let agenticInstincts: LlmInstinctDraft[] = [];
+	let agenticQuality: Partial<SkillCreateQualityReport> | undefined;
+
 	if (options.llm) {
-		const prompt = buildPrompt(
-			options.project,
-			readmeExcerpt,
-			pomExcerpt,
-			prefixes,
-			commitSamples,
-			sourceExcerpts,
-			testExcerpts,
-			docExcerpts,
+		const artifacts = await runAgenticSkillCreate({
+			repoRoot,
+			project: options.project,
+			layout: options.layout,
+			commits: options.commits,
+			includeInstincts: options.includeInstincts,
+			model: options.llm.model,
+			modelRegistry: options.llm.modelRegistry,
+			commitPrefixSummary:
+				prefixes.length > 0 ? prefixes.map((item) => `- ${item.prefix}: ${item.count}`).join("\n") : "(none)",
+			fileFrequencySummary: buildFileFrequencySummary(allFiles, 25),
+			recentCommitSamples: buildRecentCommitSamples(entries, 12),
+			candidatePaths,
 			existingSkills,
-			existingInstincts.map((instinct) => ({
+			existingInstincts: existingInstincts.map((instinct) => ({
 				id: instinct.id,
 				title: instinct.title,
 				trigger: instinct.trigger,
 				domain: instinct.domain,
 			})),
-			projectMemory,
-			globalMemory,
-		);
-		const llmGeneration = await generateWithLlm(options.project, options.llm, prompt);
-		llmResult = llmGeneration.result;
-		llmStatus = llmGeneration.status;
+			projectMemoryPath,
+			globalMemoryPath,
+		});
+		llmStatus = `agentic:${artifacts.status}`;
+		if (artifacts.skillMarkdown) {
+			agenticSkillMarkdown = normalizeSkillMarkdown(artifacts.skillMarkdown, options.project);
+			generationMode = "agentic";
+		}
+		agenticInstincts = parseInstinctDrafts(artifacts.instinctsJson);
+		agenticQuality = parseQualityDraft(artifacts.qualityJson);
+		if (!agenticSkillMarkdown && artifacts.transcript) {
+			const synthesized = await synthesizeFromTranscript(
+				options.project,
+				options.llm,
+				artifacts.transcript,
+				existingSkills,
+				existingInstincts.map((instinct) => ({
+					id: instinct.id,
+					title: instinct.title,
+					trigger: instinct.trigger,
+					domain: instinct.domain,
+				})),
+				projectMemory,
+				globalMemory,
+				options.includeInstincts,
+			);
+			llmStatus = `${llmStatus}; synth:${synthesized.status}`;
+			if (synthesized.skillMarkdown) {
+				agenticSkillMarkdown = synthesized.skillMarkdown;
+				generationMode = "agentic";
+			}
+			if (synthesized.instincts.length > 0) {
+				agenticInstincts = synthesized.instincts;
+			}
+			if (synthesized.quality) {
+				agenticQuality = synthesized.quality;
+			}
+		}
 	}
 
 	const skillMarkdown =
-		llmResult?.skillMarkdown && llmResult.skillMarkdown.trim().length > 0
-			? llmResult.skillMarkdown
-			: buildFallbackSkillMarkdown(
-					options.project,
-					prefixes,
-					sourceFiles,
-					testFiles,
-					entries,
-					readmeExcerpt,
-					pomExcerpt,
-				);
+		agenticSkillMarkdown ??
+		buildFallbackSkillMarkdown(options.project, prefixes, allFiles, testFiles, entries, manifests);
 
 	const instinctDrafts =
-		llmResult?.instincts && llmResult.instincts.length > 0
-			? llmResult.instincts
-			: buildFallbackInstincts(options.project, prefixes, testFiles);
+		agenticInstincts.length > 0
+			? agenticInstincts
+			: buildFallbackInstincts(options.project, prefixes, testFiles, buildFiles);
+
 	const dedupedInstincts = dedupeInstinctDrafts(
 		instinctDrafts,
 		existingInstincts.map((instinct) => ({
@@ -1197,20 +1296,27 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 			title: instinct.title,
 			trigger: instinct.trigger,
 			domain: instinct.domain,
+			action: instinct.content
+				.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u)?.[1]
+				?.trim()
+				.split("\n")[0],
 		})),
 	);
+
 	const quality = buildQualityReport(
+		options.project,
 		skillMarkdown,
 		existingSkills,
 		dedupedInstincts.droppedIds,
 		projectMemory,
 		globalMemory,
-		llmResult?.quality,
+		agenticQuality,
 	);
 
 	let finalSkillMarkdown = skillMarkdown;
 	let finalQuality = quality;
 	let finalLlmStatus = llmStatus;
+
 	if (
 		quality.verdict === "improve-then-save" &&
 		options.llm &&
@@ -1223,11 +1329,13 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 			finalLlmStatus = `${llmStatus}; revise:${improved.status}`;
 			finalQuality = {
 				...buildQualityReport(
+					options.project,
 					finalSkillMarkdown,
 					existingSkills,
 					dedupedInstincts.droppedIds,
 					projectMemory,
 					globalMemory,
+					agenticQuality,
 				),
 				revised: true,
 			};
@@ -1236,6 +1344,8 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 		}
 	}
 
+	const representativeFiles = candidatePaths.slice(0, 6);
+
 	if (finalQuality.verdict === "drop") {
 		return {
 			skillPath,
@@ -1243,43 +1353,42 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 			summary: [
 				`分析仓库: ${options.project.name}`,
 				`提交数: ${entries.length}`,
-				"生成方式: skipped",
+				`生成方式: ${generationMode}`,
 				`LLM状态: ${finalLlmStatus}`,
 				`质量判定: ${finalQuality.verdict}`,
 				`原因: ${finalQuality.rationale}`,
 			].join("\n"),
-			generationMode: llmResult ? "LLM" : "fallback",
+			generationMode,
 			llmStatus: finalLlmStatus,
 			quality: finalQuality,
 			commitCount: entries.length,
 			prefixes: prefixes.map((item) => `${item.prefix}(${item.count})`),
-			representativeFiles: sourceExcerpts.map((file) => file.path),
+			representativeFiles,
 		};
 	}
 
 	if (finalQuality.verdict === "absorb") {
-		const absorbContent = buildAbsorbContent(finalSkillMarkdown, finalQuality.absorbTarget);
 		return {
 			skillPath,
 			instinctPaths: [],
 			summary: [
 				`分析仓库: ${options.project.name}`,
 				`提交数: ${entries.length}`,
-				"生成方式: skipped",
+				`生成方式: ${generationMode}`,
 				`LLM状态: ${finalLlmStatus}`,
 				`质量判定: ${finalQuality.verdict}`,
 				`吸收目标: ${finalQuality.absorbTarget ?? "existing skill"}`,
 				`原因: ${finalQuality.rationale}`,
 			].join("\n"),
-			generationMode: llmResult ? "LLM" : "fallback",
+			generationMode,
 			llmStatus: finalLlmStatus,
 			quality: {
 				...finalQuality,
-				absorbContent,
+				absorbContent: buildAbsorbContent(finalSkillMarkdown, finalQuality.absorbTarget),
 			},
 			commitCount: entries.length,
 			prefixes: prefixes.map((item) => `${item.prefix}(${item.count})`),
-			representativeFiles: sourceExcerpts.map((file) => file.path),
+			representativeFiles,
 		};
 	}
 
@@ -1298,15 +1407,15 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 		`分析仓库: ${options.project.name}`,
 		`提交数: ${entries.length}`,
 		`技能文件: ${skillPath}`,
-		`生成方式: ${llmResult ? "LLM" : "fallback"}`,
+		`生成方式: ${generationMode}`,
 		`LLM状态: ${finalLlmStatus}`,
 		`质量判定: ${finalQuality.verdict}`,
 	];
 	if (prefixes.length > 0) {
 		summaryLines.push(`提交前缀: ${prefixes.map((item) => `${item.prefix}(${item.count})`).join(", ")}`);
 	}
-	if (sourceExcerpts.length > 0) {
-		summaryLines.push(`代表性源码: ${sourceExcerpts.map((file) => file.path).join(", ")}`);
+	if (representativeFiles.length > 0) {
+		summaryLines.push(`代表性路径: ${representativeFiles.join(", ")}`);
 	}
 	if (instinctPaths.length > 0) {
 		summaryLines.push(`生成 instinct: ${instinctPaths.length}`);
@@ -1322,11 +1431,11 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 		skillPath,
 		instinctPaths,
 		summary: summaryLines.join("\n"),
-		generationMode: llmResult ? "LLM" : "fallback",
+		generationMode,
 		llmStatus: finalLlmStatus,
 		quality: finalQuality,
 		commitCount: entries.length,
 		prefixes: prefixes.map((item) => `${item.prefix}(${item.count})`),
-		representativeFiles: sourceExcerpts.map((file) => file.path),
+		representativeFiles,
 	};
 }
