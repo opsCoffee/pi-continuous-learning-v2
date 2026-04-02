@@ -233,6 +233,11 @@ This matches ECC's division of labor more closely:
 - `/skill-create`: one repo-level skill
 - `/evolve --generate`: multiple evolved skills from instinct clusters
 
+Scope behavior:
+
+- project-only clusters generate into `<project>/.pi/skills|prompts|agents`
+- global-only clusters generate into `~/.pi/agent/continuous-learning-v2/evolved/...`
+
 ```bash
 /agent-run <agent-name-or-path> <task...>
 ```
@@ -271,6 +276,8 @@ Recent real-project validation covered:
 - live command validation:
   - `/observer-status`
   - `/agent-run /tmp/ecc-manual-agent.md say hello`
+  - `/promote --dry-run` with two project-local copies of the same instinct now reports one promotion candidate
+  - `/evolve --generate` with global-only instincts now emits files under `~/.pi/agent/continuous-learning-v2/evolved/...`
 
 The current soak baseline is:
 

@@ -2,7 +2,7 @@ import { readdir, readFile, stat, unlink } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { extractInstinctAction, normalizeTriggerClusterKey, renderWhenClause } from "./instinct-quality.js";
-import { fileExists, writeTextFile } from "./storage.js";
+import { fileExists, isDirectory, loadProjectRegistry, writeTextFile } from "./storage.js";
 import type {
 	ClusterCandidate,
 	EvolveAnalysis,
@@ -576,12 +576,38 @@ export function analyzeEvolution(instincts: LoadedInstinct[]): EvolveAnalysis {
 	};
 }
 
+function resolveScopedEvolvedDir(
+	layout: StorageLayout,
+	scope: InstinctScope,
+	type: "skills" | "prompts" | "agents",
+): string {
+	if (scope === "global") {
+		switch (type) {
+			case "skills":
+				return layout.globalEvolvedSkillsDir;
+			case "prompts":
+				return layout.globalEvolvedPromptsDir;
+			case "agents":
+				return layout.globalEvolvedAgentsDir;
+		}
+	}
+	switch (type) {
+		case "skills":
+			return layout.projectEvolvedSkillsDir;
+		case "prompts":
+			return layout.projectEvolvedPromptsDir;
+		case "agents":
+			return layout.projectEvolvedAgentsDir;
+	}
+}
+
 export async function generateEvolvedOutputs(layout: StorageLayout, analysis: EvolveAnalysis): Promise<string[]> {
 	const generated: string[] = [];
 
 	for (const candidate of analysis.skillCandidates.slice(0, 5)) {
 		const slug = slugify(candidate.key) || "instinct-skill";
-		const skillPath = join(layout.projectEvolvedSkillsDir, slug, "SKILL.md");
+		const dominantScope = candidate.scopes.includes("project") ? "project" : "global";
+		const skillPath = join(resolveScopedEvolvedDir(layout, dominantScope, "skills"), slug, "SKILL.md");
 		const evolvedFrom = candidate.instincts.map((instinct) => instinct.id);
 		const body = [
 			...buildFrontmatterLines([
@@ -621,7 +647,7 @@ export async function generateEvolvedOutputs(layout: StorageLayout, analysis: Ev
 			) ||
 			slugify(instinct.id) ||
 			"instinct-prompt";
-		const promptPath = join(layout.projectEvolvedPromptsDir, `${slug}.md`);
+		const promptPath = join(resolveScopedEvolvedDir(layout, instinct.scopeLabel, "prompts"), `${slug}.md`);
 		if (generated.includes(promptPath)) {
 			continue;
 		}
@@ -646,7 +672,8 @@ export async function generateEvolvedOutputs(layout: StorageLayout, analysis: Ev
 
 	for (const candidate of analysis.agentCandidates.slice(0, 3)) {
 		const slug = slugify(candidate.key) || "instinct-agent";
-		const agentPath = join(layout.projectEvolvedAgentsDir, `${slug}-agent.md`);
+		const dominantScope = candidate.scopes.includes("project") ? "project" : "global";
+		const agentPath = join(resolveScopedEvolvedDir(layout, dominantScope, "agents"), `${slug}-agent.md`);
 		const body = [
 			...buildFrontmatterLines([
 				["name", `${slug}-agent`],
@@ -691,21 +718,33 @@ export async function findPromotionCandidates(layout: StorageLayout): Promise<
 		averageConfidence: number;
 	}>
 > {
-	const projectsRoot = join(layout.rootDir, "projects");
-	if (!(await fileExists(projectsRoot))) {
+	const registry = await loadProjectRegistry(layout);
+	if (Object.keys(registry).length === 0) {
 		return [];
 	}
-	const projectDirs = await readdir(projectsRoot, { withFileTypes: true });
 	const groups = new Map<string, LoadedInstinct[]>();
 
-	for (const entry of projectDirs) {
-		if (!entry.isDirectory()) {
+	for (const project of Object.values(registry)) {
+		const projectStateDir = join(project.root, ".pi", "continuous-learning-v2");
+		if (!(await isDirectory(projectStateDir))) {
 			continue;
 		}
-		const projectDir = join(projectsRoot, entry.name);
-		const personal = await loadInstinctsFromDir(join(projectDir, "instincts", "personal"), "personal", "project");
-		const inherited = await loadInstinctsFromDir(join(projectDir, "instincts", "inherited"), "inherited", "project");
+		const personal = await loadInstinctsFromDir(
+			join(projectStateDir, "instincts", "personal"),
+			"personal",
+			"project",
+		);
+		const inherited = await loadInstinctsFromDir(
+			join(projectStateDir, "instincts", "inherited"),
+			"inherited",
+			"project",
+		);
+		const seenInProject = new Set<string>();
 		for (const instinct of [...personal, ...inherited]) {
+			if (seenInProject.has(instinct.id)) {
+				continue;
+			}
+			seenInProject.add(instinct.id);
 			const group = groups.get(instinct.id) ?? [];
 			group.push(instinct);
 			groups.set(instinct.id, group);

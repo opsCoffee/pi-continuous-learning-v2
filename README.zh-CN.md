@@ -240,6 +240,11 @@ Observer 当前行为：
 - `/skill-create`：生成一个 repo-level skill
 - `/evolve --generate`：把多主题 instinct clusters 演化成多个 skills
 
+scope 行为现在是：
+
+- 仅 project instinct 组成的 cluster，生成到 `<project>/.pi/skills|prompts|agents`
+- 仅 global instinct 组成的 cluster，生成到 `~/.pi/agent/continuous-learning-v2/evolved/...`
+
 ```bash
 /agent-run <agent-name-or-path> <task...>
 ```
@@ -288,6 +293,8 @@ Observer 当前行为：
 - 实际命令验证：
   - `/observer-status`
   - `/agent-run /tmp/ecc-manual-agent.md say hello`
+  - `/promote --dry-run` 在两个项目内存在相同 instinct 时，已能识别 promotion candidate
+  - `/evolve --generate` 在仅 global instincts 的情况下，已生成到 `~/.pi/agent/continuous-learning-v2/evolved/...`
 
 其中 `/evolve --generate` 已经在真实项目中生成多个 skill，例如：
 

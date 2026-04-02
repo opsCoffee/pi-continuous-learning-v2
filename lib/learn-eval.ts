@@ -57,6 +57,7 @@ interface ExistingSkillSummary {
 	name: string;
 	description: string;
 	filePath: string;
+	bodyPreview: string;
 }
 
 export interface LearnEvalLlmContext {
@@ -96,11 +97,18 @@ async function readOptionalText(filePath: string, maxChars: number): Promise<str
 }
 
 async function loadExistingSkills(projectRoot: string): Promise<ExistingSkillSummary[]> {
-	return loadSkills({ cwd: projectRoot }).skills.map((skill) => ({
-		name: skill.name,
-		description: skill.description,
-		filePath: skill.filePath,
-	}));
+	const loaded = loadSkills({ cwd: projectRoot }).skills;
+	const summaries: ExistingSkillSummary[] = [];
+	for (const skill of loaded) {
+		const raw = await readOptionalText(skill.filePath, 4000);
+		summaries.push({
+			name: skill.name,
+			description: skill.description,
+			filePath: skill.filePath,
+			bodyPreview: raw,
+		});
+	}
+	return summaries;
 }
 
 function extractTaggedSection(text: string, tag: string): string | null {
@@ -176,7 +184,12 @@ function buildLearnEvalPrompt(
 		"",
 		"[EXISTING SKILLS]",
 		existingSkills.length > 0
-			? existingSkills.map((skill) => `- ${skill.name}: ${skill.description} (${skill.filePath})`).join("\n")
+			? existingSkills
+					.map(
+						(skill) =>
+							`- ${skill.name}: ${skill.description} (${skill.filePath})\n${skill.bodyPreview.slice(0, 600)}`,
+					)
+					.join("\n\n")
 			: "(none)",
 		"",
 		"[PROJECT MEMORY]",

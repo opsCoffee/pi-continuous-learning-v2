@@ -121,6 +121,7 @@ interface ExistingSkillSummary {
 	name: string;
 	description: string;
 	filePath: string;
+	bodyPreview: string;
 }
 
 interface SkillCreateLlmContext {
@@ -580,13 +581,17 @@ async function readOptionalText(filePath: string, maxChars: number): Promise<str
 
 async function loadExistingSkills(projectRoot: string, outputSkillPath: string): Promise<ExistingSkillSummary[]> {
 	const skills = loadSkills({ cwd: projectRoot }).skills;
-	return skills
-		.filter((skill) => skill.filePath !== outputSkillPath)
-		.map((skill) => ({
+	const summaries: ExistingSkillSummary[] = [];
+	for (const skill of skills.filter((item) => item.filePath !== outputSkillPath)) {
+		const raw = await readOptionalText(skill.filePath, 4000);
+		summaries.push({
 			name: skill.name,
 			description: skill.description,
 			filePath: skill.filePath,
-		}));
+			bodyPreview: raw,
+		});
+	}
+	return summaries;
 }
 
 function summarizeTopAreas(allFiles: FileCount[]): string[] {
@@ -841,7 +846,7 @@ function buildQualityReport(
 	const projectToken = normalizeCompareText(project.name);
 	const overlapSkills = existingSkills
 		.filter((skill) => {
-			const score = overlapScore(skillMarkdown, `${skill.name} ${skill.description}`);
+			const score = overlapScore(skillMarkdown, `${skill.name} ${skill.description} ${skill.bodyPreview}`);
 			if (score < 0.35) {
 				return false;
 			}
@@ -849,7 +854,7 @@ function buildQualityReport(
 			if (!projectSpecific || isProjectLocal) {
 				return true;
 			}
-			const existingIdentity = normalizeCompareText(`${skill.name} ${skill.description}`);
+			const existingIdentity = normalizeCompareText(`${skill.name} ${skill.description} ${skill.bodyPreview}`);
 			return existingIdentity.includes(projectToken);
 		})
 		.map((skill) => skill.filePath)
@@ -944,7 +949,10 @@ async function synthesizeFromTranscript(
 					"[EXISTING SKILLS]",
 					existingSkills.length > 0
 						? existingSkills
-								.map((skill) => `- ${skill.name}: ${skill.description} (${skill.filePath})`)
+								.map(
+									(skill) =>
+										`- ${skill.name}: ${skill.description} (${skill.filePath})\n${skill.bodyPreview.slice(0, 600)}`,
+								)
 								.join("\n")
 						: "(none)",
 					"",

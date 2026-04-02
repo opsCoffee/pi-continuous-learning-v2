@@ -203,7 +203,9 @@ export async function loadProjectRegistry(layout: StorageLayout): Promise<Record
 	return readJsonFile<Record<string, ProjectRegistryEntry>>(layout.registryPath, {});
 }
 
-async function isDirectory(path: string): Promise<boolean> {
+export interface LoadedProjectRegistryEntry extends ProjectRegistryEntry {}
+
+export async function isDirectory(path: string): Promise<boolean> {
 	try {
 		return (await stat(path)).isDirectory();
 	} catch {

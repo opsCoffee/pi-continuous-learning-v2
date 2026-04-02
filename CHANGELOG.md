@@ -18,6 +18,8 @@
 - Changed observer scheduling to coalesce event bursts, retry after busy/cooldown skips, and prune pending instincts before analysis.
 - Changed `/learn-eval` to use verdict-specific interactive reporting and to apply `MEMORY.md` absorb targets directly.
 - Changed evolved agent artifacts to be explicitly marked as manual, non-auto-executed markdown outputs.
+- Changed promotion candidate scanning to read the current project-local `.pi/continuous-learning-v2` storage layout from the registry instead of the legacy `rootDir/projects` layout.
+- Changed `/evolve --generate` to emit project/global outputs into the matching evolved directory instead of always writing to the current project.
 - Changed documentation to reflect the current pi-native alignment with ECC semantics and the verified multi-skill evolution workflow.
 
 ## [0.0.1] - 2026-04-02
