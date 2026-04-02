@@ -236,6 +236,17 @@ Recent real-project validation covered:
 - `codeql-scanner`: `/skill-create --instincts` followed by `/evolve --generate`
 - generated multi-skill outputs such as `tests` and `workspace-manifests`
 - real observer validation with active/pending split, resulting in three active atomic instincts and zero pending drafts for the sampled session
+- repeatable observer validation script:
+  - `npx tsx scripts/observer-validation.mts --mode regression`
+  - `npx tsx scripts/observer-validation.mts --mode soak --rounds 3`
+
+The current soak baseline is:
+
+- round 1: learned `3`
+- round 2: learned `0`
+- round 3: learned `0`
+
+This confirms the observer no longer keeps learning paraphrased duplicates across repeated similar sessions.
 
 ## Notes
 

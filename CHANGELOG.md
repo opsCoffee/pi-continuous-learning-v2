@@ -8,6 +8,7 @@
 - Added pending instinct staging plus `/prune` and `/prune --dry-run` for TTL-based cleanup.
 - Added agentic ECC-style `/skill-create` based on an isolated pi SDK sub-session with restricted native tools.
 - Added multi-skill evolution flow that clusters instincts and can emit multiple skills, prompt templates, and agent markdown artifacts.
+- Added repeatable observer regression/soak validation script under `scripts/observer-validation.mts`.
 
 ### Changed
 

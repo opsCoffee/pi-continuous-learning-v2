@@ -253,6 +253,9 @@ Observer 当前行为：
 - `codeql-scanner` 上的 `/skill-create --instincts`
 - `codeql-scanner` 上的 `/evolve --generate`
 - observer 的真实 session 验证
+- 可重复执行的 observer 验证脚本：
+  - `npx tsx scripts/observer-validation.mts --mode regression`
+  - `npx tsx scripts/observer-validation.mts --mode soak --rounds 3`
 
 其中 `/evolve --generate` 已经在真实项目中生成多个 skill，例如：
 
@@ -260,6 +263,14 @@ Observer 当前行为：
 - `workspace-manifests`
 
 observer 真实验证中，active instincts 收敛为 3 条更原子的规则，pending 为 0，说明当前自动学习结果已经比早期版本更少重复、更适合后续演化。
+
+当前 soak 基线结果为：
+
+- 第 1 轮：`learned = 3`
+- 第 2 轮：`learned = 0`
+- 第 3 轮：`learned = 0`
+
+这说明在重复相似会话下，observer 不会继续累积近义重复 instinct。
 
 ## 说明
 
