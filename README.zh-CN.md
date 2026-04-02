@@ -56,6 +56,8 @@ pi -e ./packages/coding-agent/examples/extensions/continuous-learning-v2
 - `/promote`
 - `/projects`
 - `/evolve`
+- `/observer-status`
+- `/agent-run`
 - `/skill-create`
 - `/learn-eval`
 - `/prune`
@@ -130,6 +132,19 @@ Observer 和 `/skill-create` 的模型选择顺序如下：
 
 1. 当前会话活跃模型
 2. `~/.pi/agent/settings.json` 中的默认模型（`defaultProvider` + `defaultModel`）
+
+```bash
+/observer-status
+```
+
+`/observer-status` 会汇总：
+
+- observer 是否启用、是否正在运行
+- 是否已有待执行的调度任务
+- observation 总数与尚未分析的 observation 数量
+- pending instinct 数量
+- 最近一次 attempt / completion / result / error
+- 当前配置阈值
 
 Observer 当前行为：
 
@@ -225,6 +240,20 @@ Observer 当前行为：
 - `/skill-create`：生成一个 repo-level skill
 - `/evolve --generate`：把多主题 instinct clusters 演化成多个 skills
 
+```bash
+/agent-run <agent-name-or-path> <task...>
+```
+
+`/agent-run` 是 evolved agent 的显式手动运行入口。
+
+它会：
+
+- 从项目 `.pi/agents/`、全局 evolved agents，或显式路径解析 agent 文件
+- 用该 agent artifact 作为本次运行的 system prompt，启动一个隔离的 pi SDK session
+- 执行你提供的 task，并返回最终 assistant 输出
+
+这样既保留了“manual artifact only”的语义，也让生成出来的 agent 文件有明确可用的执行入口。
+
 ## /prune
 
 ```bash
@@ -256,6 +285,9 @@ Observer 当前行为：
 - 可重复执行的 observer 验证脚本：
   - `npx tsx scripts/observer-validation.mts --mode regression`
   - `npx tsx scripts/observer-validation.mts --mode soak --rounds 3`
+- 实际命令验证：
+  - `/observer-status`
+  - `/agent-run /tmp/ecc-manual-agent.md say hello`
 
 其中 `/evolve --generate` 已经在真实项目中生成多个 skill，例如：
 
@@ -271,6 +303,13 @@ observer 真实验证中，active instincts 收敛为 3 条更原子的规则，
 - 第 3 轮：`learned = 0`
 
 这说明在重复相似会话下，observer 不会继续累积近义重复 instinct。
+
+包内脚本：
+
+```bash
+npm run validate:observer
+npm run validate:observer:soak
+```
 
 ## 说明
 

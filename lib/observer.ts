@@ -51,6 +51,10 @@ export interface ObserverRuntimeState {
 	timer: NodeJS.Timeout | null;
 	scheduledAnalysis: NodeJS.Timeout | null;
 	scheduledAnalysisAt?: number;
+	lastAttemptedAt?: string;
+	lastCompletedAt?: string;
+	lastResult?: ObserverAnalysisResult;
+	lastError?: string;
 }
 
 export interface ObserverAnalysisResult {
@@ -205,43 +209,59 @@ export async function maybeAnalyzeObservations(
 	layout: StorageLayout,
 	runtime: ObserverRuntimeState,
 ): Promise<ObserverAnalysisResult> {
+	runtime.lastAttemptedAt = new Date().toISOString();
 	if (runtime.running || !ctx.isIdle()) {
-		return { learned: 0, skippedReason: "busy", retryAfterMs: 60_000 };
+		const result = { learned: 0, skippedReason: "busy", retryAfterMs: 60_000 } satisfies ObserverAnalysisResult;
+		runtime.lastResult = result;
+		return result;
 	}
 
 	const config = await loadConfig(layout);
 	if (!config.observer.enabled) {
-		return { learned: 0, skippedReason: "disabled" };
+		const result = { learned: 0, skippedReason: "disabled" } satisfies ObserverAnalysisResult;
+		runtime.lastResult = result;
+		return result;
 	}
 
 	const observerState = await loadObserverState(layout);
 	const observations = await readObservations(layout);
 	const pendingObservations = observations.slice(observerState.lastAnalyzedIndex);
 	if (pendingObservations.length < config.observer.minObservationsToAnalyze) {
-		return { learned: 0, skippedReason: "insufficient-observations" };
+		const result = { learned: 0, skippedReason: "insufficient-observations" } satisfies ObserverAnalysisResult;
+		runtime.lastResult = result;
+		return result;
 	}
 
 	const intervalMs = config.observer.runIntervalMinutes * 60_000;
 	if (observerState.lastAnalyzedAt) {
 		const elapsed = Date.now() - new Date(observerState.lastAnalyzedAt).getTime();
 		if (elapsed < intervalMs) {
-			return {
+			const result = {
 				learned: 0,
 				skippedReason: "cooldown",
 				retryAfterMs: Math.max(1_000, intervalMs - elapsed),
-			};
+			} satisfies ObserverAnalysisResult;
+			runtime.lastResult = result;
+			return result;
 		}
 	}
 
 	const resolvedModel = await resolveActiveOrDefaultModel(ctx.model, ctx.modelRegistry);
 	const model = resolvedModel.model;
 	if (!model) {
-		return { learned: 0, skippedReason: "no-model" };
+		const result = { learned: 0, skippedReason: "no-model" } satisfies ObserverAnalysisResult;
+		runtime.lastResult = result;
+		return result;
 	}
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok || !auth.apiKey) {
-		return { learned: 0, skippedReason: auth.ok ? "missing-api-key" : auth.error };
+		const result = {
+			learned: 0,
+			skippedReason: auth.ok ? "missing-api-key" : auth.error,
+		} satisfies ObserverAnalysisResult;
+		runtime.lastResult = result;
+		return result;
 	}
 
 	await prunePendingInstincts(layout, pendingTtlDays(), false);
@@ -322,7 +342,20 @@ export async function maybeAnalyzeObservations(
 			lastAnalyzedIndex: observations.length,
 			lastAnalyzedAt: new Date().toISOString(),
 		});
-		return { learned: drafts.length };
+		const result = { learned: drafts.length } satisfies ObserverAnalysisResult;
+		runtime.lastResult = result;
+		runtime.lastCompletedAt = new Date().toISOString();
+		runtime.lastError = undefined;
+		return result;
+	} catch (error) {
+		runtime.lastError = error instanceof Error ? error.message : String(error);
+		const result = {
+			learned: 0,
+			skippedReason: "analysis-error",
+			retryAfterMs: 60_000,
+		} satisfies ObserverAnalysisResult;
+		runtime.lastResult = result;
+		throw error;
 	} finally {
 		runtime.running = false;
 	}

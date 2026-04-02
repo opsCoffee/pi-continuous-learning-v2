@@ -15,6 +15,7 @@ import {
 	loadObserverState,
 } from "./lib/storage.js";
 import type {
+	AgentRunMessageDetails,
 	ContinuousLearningConfig,
 	LearnEvalMessageDetails,
 	ObservationEntry,
@@ -128,6 +129,39 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 				}
 				lines.push(`${theme.fg("muted", "Rationale:")} ${details.quality.rationale}`);
 			}
+		} else {
+			lines.push(String(message.content));
+		}
+
+		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		box.addChild(new Text(lines.join("\n"), 0, 0));
+		return box;
+	});
+
+	pi.registerMessageRenderer("continuous-learning-agent-run", (message, { expanded }, theme) => {
+		const details = message.details as AgentRunMessageDetails | undefined;
+		const lines: string[] = [];
+		lines.push(theme.fg("accent", theme.bold("╔════════════════════════════════════════════════════════════╗")));
+		lines.push(theme.fg("accent", theme.bold("║ Evolved Agent Runner                                      ║")));
+		lines.push(theme.fg("accent", theme.bold("╚════════════════════════════════════════════════════════════╝")));
+		lines.push("");
+
+		if (details) {
+			lines.push(`${theme.fg("muted", "Agent:")} ${details.agentName}`);
+			lines.push(`${theme.fg("muted", "Model:")} ${details.modelLabel}`);
+			lines.push(`${theme.fg("muted", "Mode:")} ${details.executionMode ?? "manual"}`);
+			lines.push(`${theme.fg("muted", "Session:")} ${details.sessionId}`);
+			lines.push("");
+			lines.push(theme.bold("Task"));
+			lines.push(details.task);
+			if (expanded) {
+				lines.push("");
+				lines.push(theme.bold("Agent Path"));
+				lines.push(details.agentPath);
+			}
+			lines.push("");
+			lines.push(theme.bold("Output"));
+			lines.push(details.output);
 		} else {
 			lines.push(String(message.content));
 		}
@@ -330,6 +364,7 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 	registerContinuousLearningCommands(pi, () => ({
 		project: state.project,
 		layout: state.layout,
+		observer: state.observer,
 	}));
 
 	pi.on("resources_discover", async (event) => {

@@ -167,3 +167,13 @@ export interface LearnEvalMessageDetails {
 	absorbContent?: string;
 	skillMarkdown?: string | null;
 }
+
+export interface AgentRunMessageDetails {
+	agentName: string;
+	agentPath: string;
+	executionMode?: string;
+	modelLabel: string;
+	task: string;
+	output: string;
+	sessionId: string;
+}

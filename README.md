@@ -58,6 +58,8 @@ pi -e ./packages/coding-agent/examples/extensions/continuous-learning-v2
 - `/promote`
 - `/projects`
 - `/evolve`
+- `/observer-status`
+- `/agent-run`
 - `/skill-create`
 - `/learn-eval`
 - `/prune`
@@ -143,6 +145,19 @@ Observer and `skill-create` model selection follow this order:
 1. current active session model
 2. `~/.pi/agent/settings.json` default model (`defaultProvider` + `defaultModel`)
 
+```bash
+/observer-status
+```
+
+`/observer-status` reports:
+
+- whether observer is enabled or currently running
+- whether an analysis run is already scheduled
+- total observations and not-yet-analyzed observations
+- pending instinct count
+- last attempt / completion / result / error
+- current config thresholds
+
 ## Skill Create
 
 ```bash
@@ -218,6 +233,20 @@ This matches ECC's division of labor more closely:
 - `/skill-create`: one repo-level skill
 - `/evolve --generate`: multiple evolved skills from instinct clusters
 
+```bash
+/agent-run <agent-name-or-path> <task...>
+```
+
+`/agent-run` is the explicit manual entrypoint for evolved agent artifacts.
+
+It:
+
+- resolves an agent from `.pi/agents/`, global evolved agents, or an explicit path
+- creates an isolated pi SDK session with the agent artifact as the run-specific system prompt
+- executes the provided task and returns the final assistant output
+
+This preserves the "manual artifact only" contract while still giving the generated agent files a first-class execution path.
+
 ## Prune
 
 ```bash
@@ -239,6 +268,9 @@ Recent real-project validation covered:
 - repeatable observer validation script:
   - `npx tsx scripts/observer-validation.mts --mode regression`
   - `npx tsx scripts/observer-validation.mts --mode soak --rounds 3`
+- live command validation:
+  - `/observer-status`
+  - `/agent-run /tmp/ecc-manual-agent.md say hello`
 
 The current soak baseline is:
 
@@ -247,6 +279,13 @@ The current soak baseline is:
 - round 3: learned `0`
 
 This confirms the observer no longer keeps learning paraphrased duplicates across repeated similar sessions.
+
+Package scripts:
+
+```bash
+npm run validate:observer
+npm run validate:observer:soak
+```
 
 ## Notes
 

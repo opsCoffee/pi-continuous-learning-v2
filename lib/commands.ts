@@ -1,6 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { runEvolvedAgent } from "./evolved-agent-runner.js";
 import {
 	analyzeEvolution,
 	collectPendingInstincts,
@@ -17,9 +18,16 @@ import {
 } from "./instincts.js";
 import { applyLearnEvalResult, evaluateSessionLearning } from "./learn-eval.js";
 import { resolveActiveOrDefaultModel } from "./model-selection.js";
+import type { ObserverRuntimeState } from "./observer.js";
 import { createSkillFromRepository } from "./skill-create.js";
-import { loadProjectRegistry, writeTextFile } from "./storage.js";
-import type { LearnEvalMessageDetails, ProjectInfo, SkillCreateMessageDetails, StorageLayout } from "./types.js";
+import { countObservationLines, loadConfig, loadObserverState, loadProjectRegistry, writeTextFile } from "./storage.js";
+import type {
+	AgentRunMessageDetails,
+	LearnEvalMessageDetails,
+	ProjectInfo,
+	SkillCreateMessageDetails,
+	StorageLayout,
+} from "./types.js";
 
 interface ParsedArgs {
 	flags: Map<string, string | true>;
@@ -156,6 +164,20 @@ function buildLearnEvalConfirmBody(details: LearnEvalMessageDetails): string {
 	].join("\n");
 }
 
+function formatRelativeMs(ms: number): string {
+	const seconds = Math.max(0, Math.round(ms / 1000));
+	if (seconds < 60) {
+		return `${seconds}s`;
+	}
+	const minutes = Math.floor(seconds / 60);
+	const remainingSeconds = seconds % 60;
+	return `${minutes}m ${remainingSeconds}s`;
+}
+
+function formatOptionalTimestamp(value: string | undefined): string {
+	return value ?? "(never)";
+}
+
 async function loadImportSource(source: string, cwd: string): Promise<string> {
 	if (source.startsWith("http://") || source.startsWith("https://")) {
 		const response = await fetch(source);
@@ -172,6 +194,7 @@ export function registerContinuousLearningCommands(
 	getState: () => {
 		project: ProjectInfo | null;
 		layout: StorageLayout | null;
+		observer: ObserverRuntimeState;
 	},
 ): void {
 	pi.registerCommand("instinct-status", {
@@ -223,6 +246,49 @@ export function registerContinuousLearningCommands(
 				}
 			}
 			emitReport(pi, "continuous-learning-status", lines.join("\n"));
+		},
+	});
+
+	pi.registerCommand("observer-status", {
+		description: "Show observer runtime status, scheduling state, and recent learning activity",
+		handler: async (_args, _ctx) => {
+			const { project, layout, observer } = getState();
+			if (!project || !layout) {
+				return;
+			}
+			const [config, observerState, observationCount, pending] = await Promise.all([
+				loadConfig(layout),
+				loadObserverState(layout),
+				countObservationLines(layout),
+				collectPendingInstincts(layout),
+			]);
+			const pendingObservationCount = Math.max(0, observationCount - observerState.lastAnalyzedIndex);
+			const scheduledInMs =
+				observer.scheduledAnalysisAt !== undefined
+					? Math.max(0, observer.scheduledAnalysisAt - Date.now())
+					: undefined;
+			const lines = [
+				`OBSERVER STATUS - ${currentProjectLabel(project)}`,
+				"",
+				`Enabled: ${config.observer.enabled ? "yes" : "no"}`,
+				`Running: ${observer.running ? "yes" : "no"}`,
+				`Scheduled: ${observer.scheduledAnalysis ? `yes (${formatRelativeMs(scheduledInMs ?? 0)})` : "no"}`,
+				`Observations: ${observationCount}`,
+				`Pending observations: ${pendingObservationCount}`,
+				`Pending instincts: ${pending.length}`,
+				"",
+				`Last analyzed index: ${observerState.lastAnalyzedIndex}`,
+				`Last analyzed at: ${formatOptionalTimestamp(observerState.lastAnalyzedAt)}`,
+				`Last attempted at: ${formatOptionalTimestamp(observer.lastAttemptedAt)}`,
+				`Last completed at: ${formatOptionalTimestamp(observer.lastCompletedAt)}`,
+				`Last result: ${observer.lastResult ? JSON.stringify(observer.lastResult) : "(none)"}`,
+				`Last error: ${observer.lastError ?? "(none)"}`,
+				"",
+				`Config interval: ${config.observer.runIntervalMinutes} min`,
+				`Min observations: ${config.observer.minObservationsToAnalyze}`,
+				`Max recent observations: ${config.observer.maxRecentObservations}`,
+			];
+			emitReport(pi, "continuous-learning-observer-status", lines.join("\n"));
 		},
 	});
 
@@ -468,6 +534,54 @@ export function registerContinuousLearningCommands(
 				}
 			}
 			emitReport(pi, "continuous-learning-evolve", lines.join("\n"));
+		},
+	});
+
+	pi.registerCommand("agent-run", {
+		description: "Run an evolved agent artifact manually against an explicit task",
+		handler: async (args, ctx) => {
+			const { project, layout } = getState();
+			if (!project || !layout) {
+				return;
+			}
+			const parsed = parseArgs(args);
+			const agentRef = parsed.positionals[0];
+			const task = parsed.positionals.slice(1).join(" ").trim();
+			const modelOverride =
+				typeof parsed.flags.get("model") === "string" ? String(parsed.flags.get("model")) : undefined;
+			if (!agentRef || task.length === 0) {
+				ctx.ui.notify("Usage: /agent-run <agent-name-or-path> <task...> [--model provider/id]", "warning");
+				return;
+			}
+
+			try {
+				const result = await runEvolvedAgent({
+					ctx,
+					project,
+					layout,
+					agentRef,
+					task,
+					modelOverride,
+				});
+				const details: AgentRunMessageDetails = {
+					agentName: result.agent.name,
+					agentPath: result.agent.filePath,
+					executionMode: result.agent.executionMode,
+					modelLabel: result.modelLabel,
+					task: result.task,
+					output: result.output,
+					sessionId: result.sessionId,
+				};
+				pi.sendMessage({
+					customType: "continuous-learning-agent-run",
+					content: result.output,
+					display: true,
+					details,
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`agent-run 失败: ${message}`, "error");
+			}
 		},
 	});
 
