@@ -1,0 +1,35 @@
+{
+  "name": "pi-extension-continuous-learning-v2",
+  "description": "Continuous Learning v2 plugin for pi-coding-agent",
+  "version": "0.0.1",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opsCoffee/pi-continuous-learning-v2.git"
+  },
+  "homepage": "https://github.com/opsCoffee/pi-continuous-learning-v2",
+  "bugs": {
+    "url": "https://github.com/opsCoffee/pi-continuous-learning-v2/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "continuous-learning",
+    "instincts"
+  ],
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'",
+    "check": "echo 'nothing to check'"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}

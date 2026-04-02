@@ -1,0 +1,495 @@
+import { readdir, readFile } from "node:fs/promises";
+import { basename, extname, join } from "node:path";
+import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { fileExists, writeTextFile } from "./storage.js";
+import type {
+	ClusterCandidate,
+	EvolveAnalysis,
+	ImportSummary,
+	InstinctDraft,
+	InstinctRecord,
+	InstinctScope,
+	LoadedInstinct,
+	ProjectInfo,
+	StorageLayout,
+} from "./types.js";
+
+const ALLOWED_EXTENSIONS = new Set([".md", ".yaml", ".yml"]);
+
+function clampConfidence(value: number): number {
+	return Math.max(0.3, Math.min(0.95, Number.isFinite(value) ? value : 0.5));
+}
+
+function normalizeString(value: string): string {
+	return value.trim().replace(/\s+/gu, " ");
+}
+
+function slugify(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/gu, "-")
+		.replace(/^-+/u, "")
+		.replace(/-+$/u, "")
+		.slice(0, 40);
+}
+
+function inferTitle(body: string, fallback: string): string {
+	const heading = body.match(/^#\s+(.+)$/mu)?.[1]?.trim();
+	return heading && heading.length > 0 ? heading : fallback;
+}
+
+function buildInstinctContent(title: string, action: string, evidence: string[]): string {
+	const lines = [`# ${title}`, "", "## Action", action.trim(), "", "## Evidence"];
+	if (evidence.length === 0) {
+		lines.push("- Inferred from repeated observations");
+	} else {
+		for (const item of evidence) {
+			lines.push(`- ${item}`);
+		}
+	}
+	return lines.join("\n");
+}
+
+function parseScope(value: unknown, fallback: InstinctScope): InstinctScope {
+	return value === "global" ? "global" : fallback;
+}
+
+async function loadInstinctFile(
+	filePath: string,
+	sourceType: "personal" | "inherited",
+	scopeLabel: InstinctScope,
+): Promise<LoadedInstinct | null> {
+	try {
+		const raw = await readFile(filePath, "utf-8");
+		const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(raw);
+		const id = typeof frontmatter.id === "string" ? frontmatter.id.trim() : basename(filePath, extname(filePath));
+		if (!id) {
+			return null;
+		}
+
+		const title = typeof frontmatter.title === "string" ? frontmatter.title.trim() : inferTitle(body, id);
+		const trigger = typeof frontmatter.trigger === "string" ? frontmatter.trigger.trim() : `when ${id}`;
+		const confidence =
+			typeof frontmatter.confidence === "number"
+				? frontmatter.confidence
+				: Number.parseFloat(String(frontmatter.confidence ?? "0.5"));
+		const domain = typeof frontmatter.domain === "string" ? frontmatter.domain.trim() : "general";
+		const source = typeof frontmatter.source === "string" ? frontmatter.source.trim() : sourceType;
+		const scope = parseScope(frontmatter.scope, scopeLabel);
+
+		return {
+			id,
+			title,
+			trigger,
+			confidence: clampConfidence(confidence),
+			domain,
+			source,
+			scope,
+			projectId: typeof frontmatter.project_id === "string" ? frontmatter.project_id : undefined,
+			projectName: typeof frontmatter.project_name === "string" ? frontmatter.project_name : undefined,
+			content: body.trim(),
+			created: typeof frontmatter.created === "string" ? frontmatter.created : undefined,
+			updated: typeof frontmatter.updated === "string" ? frontmatter.updated : undefined,
+			importedFrom: typeof frontmatter.imported_from === "string" ? frontmatter.imported_from : undefined,
+			promotedFrom: typeof frontmatter.promoted_from === "string" ? frontmatter.promoted_from : undefined,
+			filePath,
+			sourceType,
+			scopeLabel,
+		};
+	} catch {
+		return null;
+	}
+}
+
+async function loadInstinctsFromDir(
+	dirPath: string,
+	sourceType: "personal" | "inherited",
+	scopeLabel: InstinctScope,
+): Promise<LoadedInstinct[]> {
+	if (!(await fileExists(dirPath))) {
+		return [];
+	}
+
+	const entries = await readdir(dirPath, { withFileTypes: true });
+	const instincts: LoadedInstinct[] = [];
+	for (const entry of entries) {
+		if (!entry.isFile()) {
+			continue;
+		}
+		if (!ALLOWED_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+			continue;
+		}
+		const instinct = await loadInstinctFile(join(dirPath, entry.name), sourceType, scopeLabel);
+		if (instinct) {
+			instincts.push(instinct);
+		}
+	}
+	return instincts;
+}
+
+export async function loadProjectOnlyInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
+	const personal = await loadInstinctsFromDir(layout.projectPersonalDir, "personal", "project");
+	const inherited = await loadInstinctsFromDir(layout.projectInheritedDir, "inherited", "project");
+	return [...personal, ...inherited];
+}
+
+export async function loadMergedInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
+	const merged = new Map<string, LoadedInstinct>();
+	const ordered = [
+		...(await loadInstinctsFromDir(layout.projectPersonalDir, "personal", "project")),
+		...(await loadInstinctsFromDir(layout.projectInheritedDir, "inherited", "project")),
+		...(await loadInstinctsFromDir(layout.globalPersonalDir, "personal", "global")),
+		...(await loadInstinctsFromDir(layout.globalInheritedDir, "inherited", "global")),
+	];
+
+	for (const instinct of ordered) {
+		if (!merged.has(instinct.id)) {
+			merged.set(instinct.id, instinct);
+		}
+	}
+	return Array.from(merged.values());
+}
+
+export function serializeInstinct(instinct: InstinctRecord): string {
+	const frontmatter = [
+		"---",
+		`id: ${instinct.id}`,
+		`title: ${JSON.stringify(instinct.title)}`,
+		`trigger: ${JSON.stringify(instinct.trigger)}`,
+		`confidence: ${clampConfidence(instinct.confidence)}`,
+		`domain: ${instinct.domain}`,
+		`source: ${instinct.source}`,
+		`scope: ${instinct.scope}`,
+	];
+	if (instinct.projectId) {
+		frontmatter.push(`project_id: ${instinct.projectId}`);
+	}
+	if (instinct.projectName) {
+		frontmatter.push(`project_name: ${JSON.stringify(instinct.projectName)}`);
+	}
+	if (instinct.created) {
+		frontmatter.push(`created: ${instinct.created}`);
+	}
+	if (instinct.updated) {
+		frontmatter.push(`updated: ${instinct.updated}`);
+	}
+	if (instinct.importedFrom) {
+		frontmatter.push(`imported_from: ${JSON.stringify(instinct.importedFrom)}`);
+	}
+	if (instinct.promotedFrom) {
+		frontmatter.push(`promoted_from: ${instinct.promotedFrom}`);
+	}
+	frontmatter.push("---", "");
+	return `${frontmatter.join("\n")}${instinct.content.trim()}`;
+}
+
+export async function upsertDrafts(
+	layout: StorageLayout,
+	project: ProjectInfo,
+	existingInstincts: LoadedInstinct[],
+	drafts: InstinctDraft[],
+): Promise<LoadedInstinct[]> {
+	const existingById = new Map(existingInstincts.map((instinct) => [instinct.id, instinct]));
+	const written: LoadedInstinct[] = [];
+
+	for (const draft of drafts) {
+		const existing = existingById.get(draft.id);
+		const scope = draft.scope === "global" ? "global" : "project";
+		const targetDir = scope === "global" ? layout.globalPersonalDir : layout.projectPersonalDir;
+		const filePath = join(targetDir, `${draft.id}.md`);
+		const now = new Date().toISOString();
+		const record: InstinctRecord = {
+			id: draft.id,
+			title: normalizeString(draft.title || draft.id),
+			trigger: normalizeString(draft.trigger || `when ${draft.id}`),
+			confidence: clampConfidence(Math.max(existing?.confidence ?? 0.3, draft.confidence)),
+			domain: normalizeString(draft.domain || existing?.domain || "general"),
+			source: "session-observation",
+			scope,
+			projectId: scope === "project" ? project.id : undefined,
+			projectName: scope === "project" ? project.name : undefined,
+			content: buildInstinctContent(draft.title || draft.id, draft.action, draft.evidence),
+			created: existing?.created ?? now,
+			updated: now,
+		};
+		await writeTextFile(filePath, serializeInstinct(record));
+		written.push({
+			...record,
+			filePath,
+			sourceType: "personal",
+			scopeLabel: scope,
+		});
+	}
+
+	return written;
+}
+
+export function parseInstinctExport(content: string): LoadedInstinct[] {
+	const chunks = content
+		.split(/^---$/mu)
+		.map((chunk) => chunk.trim())
+		.filter((chunk) => chunk.length > 0);
+
+	const instincts: LoadedInstinct[] = [];
+	for (let index = 0; index < chunks.length; index += 2) {
+		const rawFrontmatter = chunks[index];
+		const rawBody = chunks[index + 1] ?? "";
+		const frontmatter: Record<string, string> = {};
+		for (const line of rawFrontmatter.split("\n")) {
+			const separatorIndex = line.indexOf(":");
+			if (separatorIndex <= 0) {
+				continue;
+			}
+			const key = line.slice(0, separatorIndex).trim();
+			const value = line
+				.slice(separatorIndex + 1)
+				.trim()
+				.replace(/^"|"$/gu, "");
+			frontmatter[key] = value;
+		}
+		if (!frontmatter.id) {
+			continue;
+		}
+		instincts.push({
+			id: frontmatter.id,
+			title: frontmatter.title ?? inferTitle(rawBody, frontmatter.id),
+			trigger: frontmatter.trigger ?? `when ${frontmatter.id}`,
+			confidence: clampConfidence(Number.parseFloat(frontmatter.confidence ?? "0.5")),
+			domain: frontmatter.domain ?? "general",
+			source: frontmatter.source ?? "inherited",
+			scope: parseScope(frontmatter.scope, "project"),
+			projectId: frontmatter.project_id,
+			projectName: frontmatter.project_name,
+			content: rawBody.trim(),
+			created: frontmatter.created,
+			updated: frontmatter.updated,
+			importedFrom: frontmatter.imported_from,
+			promotedFrom: frontmatter.promoted_from,
+			filePath: "",
+			sourceType: "inherited",
+			scopeLabel: parseScope(frontmatter.scope, "project"),
+		});
+	}
+	return instincts;
+}
+
+export async function importInstincts(
+	layout: StorageLayout,
+	project: ProjectInfo,
+	sourceName: string,
+	instincts: LoadedInstinct[],
+	targetScope: InstinctScope,
+	minConfidence: number | undefined,
+	dryRun: boolean,
+): Promise<ImportSummary> {
+	const targetDir = targetScope === "global" ? layout.globalInheritedDir : layout.projectInheritedDir;
+	const currentInstincts =
+		targetScope === "global"
+			? [
+					...(await loadInstinctsFromDir(layout.globalPersonalDir, "personal", "global")),
+					...(await loadInstinctsFromDir(layout.globalInheritedDir, "inherited", "global")),
+				]
+			: [
+					...(await loadInstinctsFromDir(layout.projectPersonalDir, "personal", "project")),
+					...(await loadInstinctsFromDir(layout.projectInheritedDir, "inherited", "project")),
+				];
+	const existingById = new Map(currentInstincts.map((instinct) => [instinct.id, instinct]));
+	const summary: ImportSummary = {
+		added: [],
+		updated: [],
+		skipped: [],
+	};
+
+	for (const instinct of instincts) {
+		if (minConfidence !== undefined && instinct.confidence < minConfidence) {
+			summary.skipped.push(instinct);
+			continue;
+		}
+		const existing = existingById.get(instinct.id);
+		if (!existing) {
+			const next = {
+				...instinct,
+				scope: targetScope,
+				scopeLabel: targetScope,
+				projectId: targetScope === "project" ? project.id : undefined,
+				projectName: targetScope === "project" ? project.name : undefined,
+				importedFrom: sourceName,
+			};
+			summary.added.push(next);
+			if (!dryRun) {
+				await writeTextFile(join(targetDir, `${instinct.id}.md`), serializeInstinct(next));
+			}
+			continue;
+		}
+		if (instinct.confidence > existing.confidence) {
+			const next = {
+				...existing,
+				...instinct,
+				scope: targetScope,
+				scopeLabel: targetScope,
+				projectId: targetScope === "project" ? project.id : undefined,
+				projectName: targetScope === "project" ? project.name : undefined,
+				importedFrom: sourceName,
+				filePath: join(targetDir, `${instinct.id}.md`),
+				sourceType: "inherited" as const,
+			};
+			summary.updated.push(next);
+			if (!dryRun) {
+				await writeTextFile(join(targetDir, `${instinct.id}.md`), serializeInstinct(next));
+			}
+			continue;
+		}
+		summary.skipped.push(existing);
+	}
+
+	return summary;
+}
+
+export function renderInstinctExport(instincts: LoadedInstinct[]): string {
+	const header = [
+		"# Instincts Export",
+		`# Generated: ${new Date().toISOString()}`,
+		`# Count: ${instincts.length}`,
+		"",
+	];
+	return header.concat(instincts.map((instinct) => serializeInstinct(instinct))).join("\n\n");
+}
+
+export function analyzeEvolution(instincts: LoadedInstinct[]): EvolveAnalysis {
+	const groups = new Map<string, LoadedInstinct[]>();
+	for (const instinct of instincts) {
+		const key = slugify(instinct.trigger) || instinct.id;
+		const existing = groups.get(key) ?? [];
+		existing.push(instinct);
+		groups.set(key, existing);
+	}
+
+	const clusterCandidates: ClusterCandidate[] = Array.from(groups.entries())
+		.map(([key, group]) => {
+			const averageConfidence = group.reduce((sum, instinct) => sum + instinct.confidence, 0) / group.length;
+			return {
+				key,
+				title: group[0].title,
+				trigger: group[0].trigger,
+				instincts: [...group].sort((left, right) => right.confidence - left.confidence),
+				averageConfidence,
+				domains: Array.from(new Set(group.map((instinct) => instinct.domain))),
+				scopes: Array.from(new Set(group.map((instinct) => instinct.scopeLabel))),
+			};
+		})
+		.sort((left, right) => right.averageConfidence - left.averageConfidence);
+
+	return {
+		skillCandidates: clusterCandidates.filter((candidate) => candidate.instincts.length >= 2),
+		promptCandidates: instincts
+			.filter((instinct) => instinct.domain === "workflow" && instinct.confidence >= 0.6)
+			.sort((left, right) => right.confidence - left.confidence),
+		agentCandidates: clusterCandidates.filter(
+			(candidate) => candidate.instincts.length >= 3 && candidate.averageConfidence >= 0.7,
+		),
+	};
+}
+
+export async function generateEvolvedOutputs(layout: StorageLayout, analysis: EvolveAnalysis): Promise<string[]> {
+	const generated: string[] = [];
+
+	for (const candidate of analysis.skillCandidates.slice(0, 5)) {
+		const slug = slugify(candidate.key) || "instinct-skill";
+		const skillPath = join(layout.projectEvolvedSkillsDir, slug, "SKILL.md");
+		const body = [
+			"---",
+			`description: Evolved from ${candidate.instincts.length} instincts`,
+			"---",
+			"",
+			`# ${candidate.title}`,
+			"",
+			`Use this skill when ${candidate.trigger}.`,
+			"",
+			"## Actions",
+			...candidate.instincts.map((instinct, index) => `${index + 1}. ${extractActionLine(instinct.content)}`),
+		].join("\n");
+		await writeTextFile(skillPath, body);
+		generated.push(skillPath);
+	}
+
+	for (const instinct of analysis.promptCandidates.slice(0, 5)) {
+		const slug = slugify(instinct.id) || "instinct-prompt";
+		const promptPath = join(layout.projectEvolvedPromptsDir, `${slug}.md`);
+		const body = [
+			"---",
+			`description: Evolved workflow from instinct ${instinct.id}`,
+			"---",
+			"",
+			`When handling tasks matching "${instinct.trigger}", apply this learned workflow:`,
+			"",
+			`- ${extractActionLine(instinct.content)}`,
+		].join("\n");
+		await writeTextFile(promptPath, body);
+		generated.push(promptPath);
+	}
+
+	for (const candidate of analysis.agentCandidates.slice(0, 3)) {
+		const slug = slugify(candidate.key) || "instinct-agent";
+		const agentPath = join(layout.projectEvolvedAgentsDir, `${slug}.md`);
+		const body = [
+			"---",
+			`name: ${slug}`,
+			`description: Evolved from ${candidate.instincts.length} instincts`,
+			"model: sonnet",
+			"---",
+			"",
+			`# ${candidate.title}`,
+			"",
+			"## Source Instincts",
+			...candidate.instincts.map((instinct) => `- ${instinct.id}`),
+		].join("\n");
+		await writeTextFile(agentPath, body);
+		generated.push(agentPath);
+	}
+
+	return generated;
+}
+
+function extractActionLine(content: string): string {
+	const match = content.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u);
+	const action = match?.[1]?.trim().split("\n")[0];
+	return action && action.length > 0 ? action : "Apply the learned pattern";
+}
+
+export async function findPromotionCandidates(layout: StorageLayout): Promise<
+	Array<{
+		id: string;
+		entries: LoadedInstinct[];
+		averageConfidence: number;
+	}>
+> {
+	const projectsRoot = join(layout.rootDir, "projects");
+	if (!(await fileExists(projectsRoot))) {
+		return [];
+	}
+	const projectDirs = await readdir(projectsRoot, { withFileTypes: true });
+	const groups = new Map<string, LoadedInstinct[]>();
+
+	for (const entry of projectDirs) {
+		if (!entry.isDirectory()) {
+			continue;
+		}
+		const projectDir = join(projectsRoot, entry.name);
+		const personal = await loadInstinctsFromDir(join(projectDir, "instincts", "personal"), "personal", "project");
+		const inherited = await loadInstinctsFromDir(join(projectDir, "instincts", "inherited"), "inherited", "project");
+		for (const instinct of [...personal, ...inherited]) {
+			const group = groups.get(instinct.id) ?? [];
+			group.push(instinct);
+			groups.set(instinct.id, group);
+		}
+	}
+
+	return Array.from(groups.entries())
+		.map(([id, entries]) => ({
+			id,
+			entries,
+			averageConfidence: entries.reduce((sum, instinct) => sum + instinct.confidence, 0) / entries.length,
+		}))
+		.filter((candidate) => candidate.entries.length >= 2 && candidate.averageConfidence >= 0.8)
+		.sort((left, right) => right.averageConfidence - left.averageConfidence);
+}
