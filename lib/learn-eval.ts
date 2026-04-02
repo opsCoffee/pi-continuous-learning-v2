@@ -96,12 +96,12 @@ async function loadExistingSkills(projectRoot: string): Promise<ExistingSkillSum
 	const loaded = loadSkills({ cwd: projectRoot }).skills;
 	const summaries: ExistingSkillSummary[] = [];
 	for (const skill of loaded) {
-		const raw = await readOptionalText(skill.filePath, 4000);
+		const raw = await readOptionalText(skill.filePath, 20000);
 		summaries.push({
 			name: skill.name,
 			description: skill.description,
 			filePath: skill.filePath,
-			bodyPreview: raw,
+			bodyText: raw,
 		});
 	}
 	return summaries;
@@ -183,7 +183,7 @@ function buildLearnEvalPrompt(
 			? existingSkills
 					.map(
 						(skill) =>
-							`- ${skill.name}: ${skill.description} (${skill.filePath})\n${skill.bodyPreview.slice(0, 600)}`,
+							`- ${skill.name}: ${skill.description} (${skill.filePath})\n${skill.bodyText.slice(0, 1500)}`,
 					)
 					.join("\n\n")
 			: "(none)",

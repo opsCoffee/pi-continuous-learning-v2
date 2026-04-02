@@ -20,7 +20,7 @@
 - Changed evolved agent artifacts to be explicitly marked as manual, non-auto-executed markdown outputs.
 - Changed promotion candidate scanning to read the current project-local `.pi/continuous-learning-v2` storage layout from the registry instead of the legacy `rootDir/projects` layout.
 - Changed `/evolve --generate` to emit project/global outputs into the matching evolved directory instead of always writing to the current project.
-- Changed overlap detection in `skill-create` and `learn-eval` to use existing skill body previews and section-level signals instead of only short metadata.
+- Changed overlap detection in `skill-create` and `learn-eval` to use deeper full-text structure matching across headings, actions, sections, paragraphs, and longer body text instead of only short metadata.
 - Changed project detection to fall back to `global` scope outside git projects instead of hashing the current directory into a synthetic project.
 - Changed project detection to honor `PI_PROJECT_DIR` and `CLAUDE_PROJECT_DIR` as explicit project root overrides.
 - Changed observer model selection so `observer.model` is used as a dedicated fallback before the global default model.

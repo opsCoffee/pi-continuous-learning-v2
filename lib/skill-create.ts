@@ -579,12 +579,12 @@ async function loadExistingSkills(projectRoot: string, outputSkillPath: string):
 	const skills = loadSkills({ cwd: projectRoot }).skills;
 	const summaries: ExistingSkillSummary[] = [];
 	for (const skill of skills.filter((item) => item.filePath !== outputSkillPath)) {
-		const raw = await readOptionalText(skill.filePath, 4000);
+		const raw = await readOptionalText(skill.filePath, 20000);
 		summaries.push({
 			name: skill.name,
 			description: skill.description,
 			filePath: skill.filePath,
-			bodyPreview: raw,
+			bodyText: raw,
 		});
 	}
 	return summaries;
@@ -854,7 +854,7 @@ function buildQualityReport(
 				return true;
 			}
 			const existingIdentity = normalizeCompareText(
-				`${entry.skill.name} ${entry.skill.description} ${entry.skill.bodyPreview}`,
+				`${entry.skill.name} ${entry.skill.description} ${entry.skill.bodyText}`,
 			);
 			return existingIdentity.includes(projectToken);
 		})
@@ -953,7 +953,7 @@ async function synthesizeFromTranscript(
 						? existingSkills
 								.map(
 									(skill) =>
-										`- ${skill.name}: ${skill.description} (${skill.filePath})\n${skill.bodyPreview.slice(0, 600)}`,
+										`- ${skill.name}: ${skill.description} (${skill.filePath})\n${skill.bodyText.slice(0, 1500)}`,
 								)
 								.join("\n")
 						: "(none)",
