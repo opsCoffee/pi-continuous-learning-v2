@@ -133,6 +133,8 @@ Observer behavior:
 - higher-confidence observer instincts are written into active instinct storage
 - lower-confidence observer instincts are staged under `instincts/pending/`
 - `/prune` removes expired pending instincts with a 30-day default TTL
+- observation bursts are coalesced into scheduled analysis runs instead of re-triggering analysis on every event
+- busy or cooldown observer runs are retried later using pi-native scheduling instead of shell signals
 - observer prompts include existing active and pending instincts to reduce near-duplicate learning
 - observer output is filtered toward atomic, reusable rules that are easier to evolve into skills
 
@@ -194,6 +196,10 @@ Verdict behavior:
 
 By default it reports the draft and verdict. In interactive mode it asks for confirmation before saving or absorbing. In non-interactive mode, use `--apply` or `--force` to write the result.
 
+Interactive `learn-eval` results use a dedicated custom renderer with verdict-specific sections for checklist, absorb content, improvements, and the draft skill.
+
+When the verdict is `absorb` and the target is `MEMORY.md`, the plugin now appends the learned pattern to the resolved project or global MEMORY file instead of only reporting a suggestion.
+
 ## Evolve
 
 ```bash
@@ -235,6 +241,7 @@ Recent real-project validation covered:
 
 - The observer runs inside the active pi process. It does not spawn a detached daemon.
 - Evolved commands are generated as pi prompt templates, which makes them native slash commands in pi.
-- Evolved agents are generated as markdown artifacts only. They are not auto-executed.
+- Evolved agents are generated as markdown artifacts only. They are explicitly marked as manual artifacts and are not auto-executed.
 - `continuous-learning-skill-create` messages have a custom renderer in interactive mode.
+- `continuous-learning-learn-eval` messages also have a custom renderer in interactive mode.
 - Root-level `npm run check` in `pi-mono` is currently blocked by existing `packages/web-ui` issues. Plugin validation is done with submodule-local checks and targeted real-session tests.

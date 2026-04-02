@@ -136,6 +136,8 @@ Observer 当前行为：
 - 高置信度 instinct 直接写入 active instinct 存储
 - 低置信度 instinct 先进入 `pending/`
 - `/prune` 只清理过期 pending instincts，默认 TTL 为 30 天
+- observation 突发不会每次都直接触发分析，而是会合并成延后调度的 observer 运行
+- 如果 observer 因 busy / cooldown 被跳过，会通过 `pi` 进程内调度稍后重试，而不是依赖 shell signal
 - observer 在生成时会参考已有 active/pending instincts，减少近义重复
 - 输出目标偏向原子、可聚类、可后续 evolve 的规则
 
@@ -201,6 +203,10 @@ Observer 当前行为：
 
 默认只报告结果；交互模式下会确认后再写入；非交互模式使用 `--apply` 或 `--force` 才会真正落盘。
 
+交互模式下，`/learn-eval` 现在有专用自定义渲染，会按 verdict 展示 checklist、改进项、吸收内容和 draft skill。
+
+当 verdict 为 `absorb` 且目标是 `MEMORY.md` 时，插件会按 project/global scope 解析实际 MEMORY 路径，并直接把 learned pattern 追加进去，而不是只给建议文本。
+
 ## /evolve
 
 ```bash
@@ -259,5 +265,6 @@ observer 真实验证中，active instincts 收敛为 3 条更原子的规则，
 
 - observer 运行在当前 `pi` 进程内，不会启动独立 daemon
 - evolved commands 通过 `pi` prompt template 暴露
-- evolved agents 目前只生成 markdown 产物，不会自动执行
+- evolved agents 目前只生成 markdown 产物，并在 frontmatter 中明确标记为 manual artifact，不会自动执行
+- `continuous-learning-learn-eval` 现在也有交互模式下的自定义渲染
 - `pi-mono` 根级 `npm run check` 目前仍受仓库现有 `packages/web-ui` 问题阻塞；插件验证以子模块自身检查和真实会话验证为主

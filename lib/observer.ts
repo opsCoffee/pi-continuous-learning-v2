@@ -1,8 +1,11 @@
 import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { dedupeComparableInstincts, extractInstinctAction } from "./instinct-quality.js";
 import {
 	loadMergedInstincts,
 	loadPendingInstincts,
+	pendingTtlDays,
+	prunePendingInstincts,
 	removePendingInstincts,
 	stagePendingDrafts,
 	upsertDrafts,
@@ -46,6 +49,14 @@ Rules:
 export interface ObserverRuntimeState {
 	running: boolean;
 	timer: NodeJS.Timeout | null;
+	scheduledAnalysis: NodeJS.Timeout | null;
+	scheduledAnalysisAt?: number;
+}
+
+export interface ObserverAnalysisResult {
+	learned: number;
+	skippedReason?: string;
+	retryAfterMs?: number;
 }
 
 function scrubText(text: string | undefined, maxLength: number): string | undefined {
@@ -64,8 +75,7 @@ function summarizeExistingInstincts(
 	return instincts
 		.slice(0, 12)
 		.map((instinct) => {
-			const actionMatch = instinct.content.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u);
-			const action = actionMatch?.[1]?.trim().split("\n")[0] ?? "no action";
+			const action = extractInstinctAction(instinct.content, "no action");
 			return `- ${instinct.id} (${Math.round(instinct.confidence * 100)}%): ${instinct.trigger} -> ${action}`;
 		})
 		.join("\n");
@@ -165,82 +175,6 @@ function parseDrafts(text: string): InstinctDraft[] {
 	}
 }
 
-function normalizeForCompare(value: string): string {
-	return value
-		.toLowerCase()
-		.replace(/[`*_>#-]/gu, " ")
-		.replace(/\s+/gu, " ")
-		.trim();
-}
-
-function tokenize(value: string): Set<string> {
-	return new Set(
-		normalizeForCompare(value)
-			.split(" ")
-			.filter((token) => token.length >= 3),
-	);
-}
-
-function overlapScore(left: string, right: string): number {
-	const leftTokens = tokenize(left);
-	const rightTokens = tokenize(right);
-	if (leftTokens.size === 0 || rightTokens.size === 0) {
-		return 0;
-	}
-	let overlap = 0;
-	for (const token of leftTokens) {
-		if (rightTokens.has(token)) {
-			overlap++;
-		}
-	}
-	return overlap / Math.min(leftTokens.size, rightTokens.size);
-}
-
-function dedupeDrafts(drafts: InstinctDraft[]): InstinctDraft[] {
-	const kept: InstinctDraft[] = [];
-	for (const draft of drafts.sort((left, right) => right.confidence - left.confidence)) {
-		const duplicate = kept.some((existing) => {
-			const triggerScore = overlapScore(existing.trigger, draft.trigger);
-			const actionScore = overlapScore(existing.action, draft.action);
-			const overallScore = overlapScore(
-				`${existing.title} ${existing.trigger} ${existing.action}`,
-				`${draft.title} ${draft.trigger} ${draft.action}`,
-			);
-			if (triggerScore >= 0.8 && actionScore < 0.45) {
-				return false;
-			}
-			return overallScore >= 0.72 || (triggerScore >= 0.8 && actionScore >= 0.55);
-		});
-		if (!duplicate) {
-			kept.push(draft);
-		}
-	}
-	return kept;
-}
-
-function filterDraftsAgainstExisting(
-	drafts: InstinctDraft[],
-	existing: Array<{ id: string; trigger: string; action: string }>,
-): InstinctDraft[] {
-	return drafts.filter((draft) => {
-		return !existing.some((instinct) => {
-			if (instinct.id === draft.id) {
-				return false;
-			}
-			const triggerScore = overlapScore(instinct.trigger, draft.trigger);
-			const actionScore = overlapScore(instinct.action, draft.action);
-			const overallScore = overlapScore(
-				`${instinct.trigger} ${instinct.action}`,
-				`${draft.trigger} ${draft.action}`,
-			);
-			if (triggerScore >= 0.8 && actionScore < 0.45) {
-				return false;
-			}
-			return overallScore >= 0.72 || (triggerScore >= 0.8 && actionScore >= 0.55);
-		});
-	});
-}
-
 function formatObservationForPrompt(observation: {
 	event: string;
 	inputText?: string;
@@ -270,9 +204,9 @@ export async function maybeAnalyzeObservations(
 	project: ProjectInfo,
 	layout: StorageLayout,
 	runtime: ObserverRuntimeState,
-): Promise<{ learned: number; skippedReason?: string }> {
+): Promise<ObserverAnalysisResult> {
 	if (runtime.running || !ctx.isIdle()) {
-		return { learned: 0, skippedReason: "busy" };
+		return { learned: 0, skippedReason: "busy", retryAfterMs: 60_000 };
 	}
 
 	const config = await loadConfig(layout);
@@ -291,7 +225,11 @@ export async function maybeAnalyzeObservations(
 	if (observerState.lastAnalyzedAt) {
 		const elapsed = Date.now() - new Date(observerState.lastAnalyzedAt).getTime();
 		if (elapsed < intervalMs) {
-			return { learned: 0, skippedReason: "cooldown" };
+			return {
+				learned: 0,
+				skippedReason: "cooldown",
+				retryAfterMs: Math.max(1_000, intervalMs - elapsed),
+			};
 		}
 	}
 
@@ -306,6 +244,7 @@ export async function maybeAnalyzeObservations(
 		return { learned: 0, skippedReason: auth.ok ? "missing-api-key" : auth.error };
 	}
 
+	await prunePendingInstincts(layout, pendingTtlDays(), false);
 	const existingInstincts = await loadMergedInstincts(layout);
 	const pendingInstincts = await loadPendingInstincts(layout);
 	const sampled = pendingObservations
@@ -358,18 +297,15 @@ export async function maybeAnalyzeObservations(
 			.filter((item): item is { type: "text"; text: string } => item.type === "text")
 			.map((item) => item.text)
 			.join("\n");
-		const drafts = filterDraftsAgainstExisting(
-			dedupeDrafts(parseDrafts(text)),
+		const drafts = dedupeComparableInstincts(
+			parseDrafts(text),
 			[...existingInstincts, ...pendingInstincts].map((instinct) => ({
 				id: instinct.id,
+				title: instinct.title,
 				trigger: instinct.trigger,
-				action:
-					instinct.content
-						.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u)?.[1]
-						?.trim()
-						.split("\n")[0] ?? "",
+				action: extractInstinctAction(instinct.content),
 			})),
-		);
+		).kept;
 		const activeDrafts = drafts.filter((draft) => draft.confidence >= 0.7);
 		const pendingDrafts = drafts.filter((draft) => draft.confidence < 0.7);
 		if (activeDrafts.length > 0) {

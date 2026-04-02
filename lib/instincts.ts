@@ -1,6 +1,7 @@
 import { readdir, readFile, stat, unlink } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { extractInstinctAction, normalizeTriggerClusterKey, renderWhenClause } from "./instinct-quality.js";
 import { fileExists, writeTextFile } from "./storage.js";
 import type {
 	ClusterCandidate,
@@ -15,29 +16,6 @@ import type {
 } from "./types.js";
 
 const ALLOWED_EXTENSIONS = new Set([".md", ".yaml", ".yml"]);
-const TRIGGER_STOP_WORDS = new Set([
-	"when",
-	"creating",
-	"writing",
-	"adding",
-	"implementing",
-	"testing",
-	"handling",
-	"modifying",
-	"changing",
-	"updating",
-	"working",
-	"using",
-	"doing",
-	"with",
-	"for",
-	"the",
-	"a",
-	"an",
-	"to",
-	"or",
-	"and",
-]);
 const PENDING_TTL_DAYS = 30;
 const PENDING_EXPIRY_WARNING_DAYS = 7;
 
@@ -64,21 +42,6 @@ function humanizeSlug(value: string): string {
 		.filter((part) => part.length > 0)
 		.map((part) => part[0]?.toUpperCase() + part.slice(1))
 		.join(" ");
-}
-
-function renderWhenClause(trigger: string): string {
-	const normalized = normalizeString(trigger);
-	return normalized.replace(/^when\s+/iu, "");
-}
-
-function normalizeTriggerKey(trigger: string, domain: string): string {
-	const normalized = normalizeString(trigger)
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/gu, " ")
-		.split(" ")
-		.filter((part) => part.length > 0 && !TRIGGER_STOP_WORDS.has(part))
-		.join(" ");
-	return normalized.length > 0 ? normalized : `${domain} ${slugify(trigger) || "pattern"}`;
 }
 
 function buildFrontmatterLines(entries: Array<[string, string | string[]]>): string[] {
@@ -567,10 +530,14 @@ export function pendingExpiryThresholdDays(): number {
 	return PENDING_TTL_DAYS - PENDING_EXPIRY_WARNING_DAYS;
 }
 
+export function pendingTtlDays(): number {
+	return PENDING_TTL_DAYS;
+}
+
 export function analyzeEvolution(instincts: LoadedInstinct[]): EvolveAnalysis {
 	const groups = new Map<string, LoadedInstinct[]>();
 	for (const instinct of instincts) {
-		const key = normalizeTriggerKey(instinct.trigger, instinct.domain);
+		const key = normalizeTriggerClusterKey(instinct.trigger, instinct.domain);
 		const existing = groups.get(key) ?? [];
 		existing.push(instinct);
 		groups.set(key, existing);
@@ -685,6 +652,7 @@ export async function generateEvolvedOutputs(layout: StorageLayout, analysis: Ev
 				["name", `${slug}-agent`],
 				["description", `Evolved from ${candidate.instincts.length} instincts about ${candidate.trigger}`],
 				["model", "sonnet"],
+				["execution_mode", "manual-artifact-only"],
 				["evolved_from", candidate.instincts.map((instinct) => instinct.id)],
 			]),
 			`# ${candidate.title} Agent`,
@@ -701,6 +669,9 @@ export async function generateEvolvedOutputs(layout: StorageLayout, analysis: Ev
 			"",
 			"## Actions",
 			...candidate.instincts.map((instinct) => `- ${extractActionLine(instinct.content)}`),
+			"",
+			"## Execution",
+			"This generated agent is a markdown artifact only. It is not auto-executed by pi and must be consumed manually or by another extension.",
 		].join("\n");
 		await writeTextFile(agentPath, body);
 		generated.push(agentPath);
@@ -710,9 +681,7 @@ export async function generateEvolvedOutputs(layout: StorageLayout, analysis: Ev
 }
 
 function extractActionLine(content: string): string {
-	const match = content.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u);
-	const action = match?.[1]?.trim().split("\n")[0];
-	return action && action.length > 0 ? action : "Apply the learned pattern";
+	return extractInstinctAction(content, "Apply the learned pattern");
 }
 
 export async function findPromotionCandidates(layout: StorageLayout): Promise<

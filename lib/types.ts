@@ -151,3 +151,19 @@ export interface SkillCreateMessageDetails {
 	representativeFiles: string[];
 	quality: SkillCreateQualityReport;
 }
+
+export interface LearnEvalMessageDetails {
+	projectLabel: string;
+	verdict: SkillCreateQualityReport["verdict"];
+	scope: InstinctScope;
+	target: string;
+	targetPath: string | null;
+	applied: boolean;
+	awaitingConfirmation: boolean;
+	rationale: string;
+	checklist: string[];
+	improvements?: string[];
+	absorbTarget?: string;
+	absorbContent?: string;
+	skillMarkdown?: string | null;
+}

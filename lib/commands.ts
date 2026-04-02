@@ -19,7 +19,7 @@ import { applyLearnEvalResult, evaluateSessionLearning } from "./learn-eval.js";
 import { resolveActiveOrDefaultModel } from "./model-selection.js";
 import { createSkillFromRepository } from "./skill-create.js";
 import { loadProjectRegistry, writeTextFile } from "./storage.js";
-import type { ProjectInfo, SkillCreateMessageDetails, StorageLayout } from "./types.js";
+import type { LearnEvalMessageDetails, ProjectInfo, SkillCreateMessageDetails, StorageLayout } from "./types.js";
 
 interface ParsedArgs {
 	flags: Map<string, string | true>;
@@ -104,6 +104,56 @@ function emitReport(pi: ExtensionAPI, customType: string, content: string): void
 
 function currentProjectLabel(project: ProjectInfo): string {
 	return `${project.name} (${project.id})`;
+}
+
+function buildLearnEvalTarget(details: {
+	verdict: "save" | "improve-then-save" | "absorb" | "drop";
+	absorbTarget?: string;
+	targetPath: string | null;
+}): string {
+	return details.verdict === "absorb" ? (details.absorbTarget ?? "existing skill") : (details.targetPath ?? "(none)");
+}
+
+function buildLearnEvalSummary(details: LearnEvalMessageDetails): string {
+	const status = details.awaitingConfirmation ? "awaiting-confirmation" : details.applied ? "applied" : "not-applied";
+	return [
+		`LEARN EVAL - ${details.projectLabel}`,
+		`Verdict: ${details.verdict}`,
+		`Scope: ${details.scope}`,
+		`Target: ${details.target}`,
+		`Status: ${status}`,
+		`Rationale: ${details.rationale}`,
+	].join("\n");
+}
+
+function emitLearnEvalReport(pi: ExtensionAPI, details: LearnEvalMessageDetails): void {
+	pi.sendMessage({
+		customType: "continuous-learning-learn-eval",
+		content: buildLearnEvalSummary(details),
+		display: true,
+		details,
+	});
+}
+
+function buildLearnEvalConfirmTitle(verdict: LearnEvalMessageDetails["verdict"]): string {
+	if (verdict === "absorb") {
+		return "Absorb learned pattern?";
+	}
+	if (verdict === "improve-then-save") {
+		return "Save revised learned pattern?";
+	}
+	return "Save learned pattern?";
+}
+
+function buildLearnEvalConfirmBody(details: LearnEvalMessageDetails): string {
+	return [
+		`Target: ${details.target}`,
+		`Scope: ${details.scope}`,
+		"",
+		...details.checklist.map((item) => `- ${item}`),
+		"",
+		details.rationale,
+	].join("\n");
 }
 
 async function loadImportSource(source: string, cwd: string): Promise<string> {
@@ -533,16 +583,40 @@ export function registerContinuousLearningCommands(
 					},
 				});
 
+				const target = buildLearnEvalTarget({
+					verdict: result.quality.verdict,
+					absorbTarget: result.quality.absorbTarget,
+					targetPath: result.targetPath,
+				});
+				const baseDetails: LearnEvalMessageDetails = {
+					projectLabel: currentProjectLabel(project),
+					verdict: result.quality.verdict,
+					scope: result.quality.scope,
+					target,
+					targetPath: result.targetPath,
+					applied: false,
+					awaitingConfirmation: false,
+					rationale: result.quality.rationale,
+					checklist: result.quality.checklist,
+					improvements: result.quality.improvements,
+					absorbTarget: result.quality.absorbTarget,
+					absorbContent: result.quality.absorbContent,
+					skillMarkdown: result.skillMarkdown,
+				};
+				const needsConfirmation = ctx.hasUI && !applyRequested && result.quality.verdict !== "drop";
+				if (needsConfirmation) {
+					emitLearnEvalReport(pi, {
+						...baseDetails,
+						awaitingConfirmation: true,
+					});
+				}
+
 				let applied = false;
 				if (result.quality.verdict !== "drop") {
-					if (ctx.hasUI && !applyRequested) {
-						const target =
-							result.quality.verdict === "absorb"
-								? (result.quality.absorbTarget ?? "existing skill")
-								: (result.targetPath ?? "new learned skill");
+					if (needsConfirmation) {
 						const confirmed = await ctx.ui.confirm(
-							result.quality.verdict === "absorb" ? "Absorb learned pattern?" : "Save learned pattern?",
-							`${target}\n\n${result.quality.rationale}`,
+							buildLearnEvalConfirmTitle(result.quality.verdict),
+							buildLearnEvalConfirmBody(baseDetails),
 						);
 						if (confirmed) {
 							await applyLearnEvalResult(result);
@@ -557,33 +631,10 @@ export function registerContinuousLearningCommands(
 				if (applied && ctx.hasUI) {
 					await ctx.reload();
 				}
-
-				const lines = [
-					`LEARN EVAL - ${currentProjectLabel(project)}`,
-					`Verdict: ${result.quality.verdict}`,
-					`Scope: ${result.quality.scope}`,
-					`Target: ${result.quality.verdict === "absorb" ? (result.quality.absorbTarget ?? "existing skill") : (result.targetPath ?? "(none)")}`,
-					`Applied: ${applied ? "yes" : "no"}`,
-					"",
-					"### Checklist",
-					...result.quality.checklist.map((item) => `- ${item}`),
-					"",
-					`Rationale: ${result.quality.rationale}`,
-				];
-				if (result.quality.improvements && result.quality.improvements.length > 0) {
-					lines.push("", "### Improvements", ...result.quality.improvements.map((item) => `- ${item}`));
-				}
-				if (result.quality.absorbContent) {
-					lines.push("", "### Absorb Content", result.quality.absorbContent);
-				}
-				if (
-					result.skillMarkdown &&
-					(result.quality.verdict === "save" || result.quality.verdict === "improve-then-save")
-				) {
-					lines.push("", "### Draft Skill", result.skillMarkdown);
-				}
-
-				emitReport(pi, "continuous-learning-learn-eval", lines.join("\n"));
+				emitLearnEvalReport(pi, {
+					...baseDetails,
+					applied,
+				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`learn-eval 失败: ${message}`, "error");

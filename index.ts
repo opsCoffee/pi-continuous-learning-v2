@@ -16,6 +16,7 @@ import {
 } from "./lib/storage.js";
 import type {
 	ContinuousLearningConfig,
+	LearnEvalMessageDetails,
 	ObservationEntry,
 	ProjectInfo,
 	SkillCreateMessageDetails,
@@ -136,6 +137,73 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 		return box;
 	});
 
+	pi.registerMessageRenderer("continuous-learning-learn-eval", (message, { expanded }, theme) => {
+		const details = message.details as LearnEvalMessageDetails | undefined;
+		const lines: string[] = [];
+
+		lines.push(theme.fg("accent", theme.bold("╔════════════════════════════════════════════════════════════╗")));
+		lines.push(theme.fg("accent", theme.bold("║ ECC Learn Eval                                            ║")));
+		lines.push(
+			theme.fg(
+				"accent",
+				theme.bold(
+					`║ Project: ${details?.projectLabel ?? "unknown"}${" ".repeat(Math.max(0, 46 - (details?.projectLabel?.length ?? 7)))}║`,
+				),
+			),
+		);
+		lines.push(theme.fg("accent", theme.bold("╚════════════════════════════════════════════════════════════╝")));
+		lines.push("");
+
+		if (details) {
+			const status = details.awaitingConfirmation
+				? theme.fg("warning", "awaiting-confirmation")
+				: details.applied
+					? theme.fg("success", "applied")
+					: theme.fg("muted", "not-applied");
+			lines.push(`${theme.fg("muted", "Verdict:")} ${details.verdict}`);
+			lines.push(`${theme.fg("muted", "Scope:")} ${details.scope}`);
+			lines.push(`${theme.fg("muted", "Target:")} ${details.target}`);
+			lines.push(`${theme.fg("muted", "Status:")} ${status}`);
+			lines.push("");
+			lines.push(theme.bold("Checklist"));
+			for (const item of details.checklist) {
+				lines.push(`- ${item}`);
+			}
+			lines.push("");
+			lines.push(`${theme.fg("muted", "Rationale:")} ${details.rationale}`);
+			if (expanded) {
+				if (details.improvements && details.improvements.length > 0) {
+					lines.push("");
+					lines.push(theme.bold("Improvements"));
+					for (const item of details.improvements) {
+						lines.push(`- ${item}`);
+					}
+				}
+				if (details.absorbTarget) {
+					lines.push("");
+					lines.push(theme.bold("Absorb Target"));
+					lines.push(details.absorbTarget);
+				}
+				if (details.absorbContent) {
+					lines.push("");
+					lines.push(theme.bold("Absorb Content"));
+					lines.push(details.absorbContent);
+				}
+				if (details.skillMarkdown && (details.verdict === "save" || details.verdict === "improve-then-save")) {
+					lines.push("");
+					lines.push(theme.bold("Draft Skill"));
+					lines.push(details.skillMarkdown);
+				}
+			}
+		} else {
+			lines.push(String(message.content));
+		}
+
+		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		box.addChild(new Text(lines.join("\n"), 0, 0));
+		return box;
+	});
+
 	const state: RuntimeState = {
 		project: null,
 		layout: null,
@@ -143,6 +211,7 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 		observer: {
 			running: false,
 			timer: null,
+			scheduledAnalysis: null,
 		},
 	};
 
@@ -151,6 +220,11 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 			clearInterval(state.observer.timer);
 			state.observer.timer = null;
 		}
+		if (state.observer.scheduledAnalysis) {
+			clearTimeout(state.observer.scheduledAnalysis);
+			state.observer.scheduledAnalysis = null;
+			state.observer.scheduledAnalysisAt = undefined;
+		}
 	};
 
 	const setupProject = async (ctx: ExtensionContext) => {
@@ -158,6 +232,45 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 		state.layout = getStorageLayout(state.project);
 		await ensureStorage(state.project, state.layout);
 		state.config = await loadConfig(state.layout);
+	};
+
+	const scheduleObserverAnalysis = async (ctx: ExtensionContext, delayMs: number) => {
+		if (!state.project || !state.layout) {
+			return;
+		}
+		state.config = state.config ?? (await loadConfig(state.layout));
+		if (!state.config.observer.enabled) {
+			return;
+		}
+		const scheduledAt = Date.now() + Math.max(0, delayMs);
+		if (
+			state.observer.scheduledAnalysis &&
+			state.observer.scheduledAnalysisAt !== undefined &&
+			state.observer.scheduledAnalysisAt <= scheduledAt
+		) {
+			return;
+		}
+		if (state.observer.scheduledAnalysis) {
+			clearTimeout(state.observer.scheduledAnalysis);
+		}
+		state.observer.scheduledAnalysisAt = scheduledAt;
+		state.observer.scheduledAnalysis = setTimeout(
+			() => {
+				state.observer.scheduledAnalysis = null;
+				state.observer.scheduledAnalysisAt = undefined;
+				if (!state.project || !state.layout) {
+					return;
+				}
+				void maybeAnalyzeObservations(ctx, state.project, state.layout, state.observer)
+					.then((result) => {
+						if (result.retryAfterMs && state.config?.observer.enabled) {
+							void scheduleObserverAnalysis(ctx, result.retryAfterMs);
+						}
+					})
+					.catch(() => {});
+			},
+			Math.max(0, delayMs),
+		);
 	};
 
 	const scheduleObserver = async (ctx: ExtensionContext) => {
@@ -174,7 +287,7 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 			if (!state.project || !state.layout) {
 				return;
 			}
-			void maybeAnalyzeObservations(ctx, state.project, state.layout, state.observer).catch(() => {});
+			void scheduleObserverAnalysis(ctx, 0);
 		}, intervalMs);
 	};
 
@@ -190,7 +303,7 @@ export default function continuousLearningV2(pi: ExtensionAPI) {
 		const observerState = await loadObserverState(state.layout);
 		const pending = observationCount - observerState.lastAnalyzedIndex;
 		if (pending >= state.config.observer.minObservationsToAnalyze) {
-			void maybeAnalyzeObservations(ctx, state.project, state.layout, state.observer).catch(() => {});
+			await scheduleObserverAnalysis(ctx, 15_000);
 		}
 	};
 

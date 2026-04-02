@@ -13,6 +13,9 @@
 
 - Changed `/skill-create --instincts` to prefer smaller, more clusterable repo-analysis instincts for later `/evolve --generate` runs.
 - Changed observer generation to include active and pending instinct context, reducing near-duplicate learning and improving instinct atomicity.
+- Changed observer scheduling to coalesce event bursts, retry after busy/cooldown skips, and prune pending instincts before analysis.
+- Changed `/learn-eval` to use verdict-specific interactive reporting and to apply `MEMORY.md` absorb targets directly.
+- Changed evolved agent artifacts to be explicitly marked as manual, non-auto-executed markdown outputs.
 - Changed documentation to reflect the current pi-native alignment with ECC semantics and the verified multi-skill evolution workflow.
 
 ## [0.0.1] - 2026-04-02

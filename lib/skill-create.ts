@@ -5,6 +5,12 @@ import { promisify } from "node:util";
 import { complete, type Model, type UserMessage } from "@mariozechner/pi-ai";
 import { getAgentDir, loadSkills, type ModelRegistry, parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { runAgenticSkillCreate } from "./agentic-skill-create.js";
+import {
+	dedupeComparableInstincts,
+	extractInstinctAction,
+	normalizeCompareText,
+	overlapScore,
+} from "./instinct-quality.js";
 import { loadProjectOnlyInstincts, serializeInstinct } from "./instincts.js";
 import { writeTextFile } from "./storage.js";
 import type { ProjectInfo, SkillCreateQualityReport, StorageLayout } from "./types.js";
@@ -809,91 +815,16 @@ function buildFallbackInstincts(
 	return drafts.slice(0, 6);
 }
 
-function normalizeForCompare(value: string): string {
-	return value
-		.toLowerCase()
-		.replace(/[`*_>#-]/gu, " ")
-		.replace(/\s+/gu, " ")
-		.trim();
-}
-
-function tokenize(value: string): Set<string> {
-	return new Set(
-		normalizeForCompare(value)
-			.split(" ")
-			.filter((token) => token.length >= 3),
-	);
-}
-
 function isRepoSpecificSkill(project: ProjectInfo, skillMarkdown: string): boolean {
-	return normalizeForCompare(skillMarkdown).includes(normalizeForCompare(project.name));
-}
-
-function overlapScore(left: string, right: string): number {
-	const leftTokens = tokenize(left);
-	const rightTokens = tokenize(right);
-	if (leftTokens.size === 0 || rightTokens.size === 0) {
-		return 0;
-	}
-	let overlap = 0;
-	for (const token of leftTokens) {
-		if (rightTokens.has(token)) {
-			overlap++;
-		}
-	}
-	return overlap / Math.min(leftTokens.size, rightTokens.size);
+	return normalizeCompareText(skillMarkdown).includes(normalizeCompareText(project.name));
 }
 
 function dedupeInstinctDrafts(
 	drafts: LlmInstinctDraft[],
 	existingInstincts: Array<{ id: string; title: string; trigger: string; domain: string; action?: string }>,
 ): { drafts: LlmInstinctDraft[]; droppedIds: string[] } {
-	const kept: LlmInstinctDraft[] = [];
-	const droppedIds: string[] = [];
-
-	for (const draft of drafts) {
-		const overlapsExisting = existingInstincts.some((instinct) => {
-			if (instinct.id === draft.id) {
-				return false;
-			}
-			const triggerScore = overlapScore(instinct.trigger, draft.trigger);
-			const actionScore = overlapScore(instinct.action ?? "", draft.action);
-			const overallScore = overlapScore(
-				`${instinct.title} ${instinct.trigger} ${instinct.action ?? ""}`,
-				`${draft.title} ${draft.trigger} ${draft.action}`,
-			);
-			if (triggerScore >= 0.8 && actionScore < 0.45) {
-				return false;
-			}
-			return overallScore >= 0.68 || (triggerScore >= 0.8 && actionScore >= 0.45);
-		});
-		if (overlapsExisting) {
-			droppedIds.push(draft.id);
-			continue;
-		}
-		const overlapsKept = kept.some((instinct) => {
-			if (instinct.id === draft.id) {
-				return false;
-			}
-			const triggerScore = overlapScore(instinct.trigger, draft.trigger);
-			const actionScore = overlapScore(instinct.action, draft.action);
-			const overallScore = overlapScore(
-				`${instinct.title} ${instinct.trigger} ${instinct.action}`,
-				`${draft.title} ${draft.trigger} ${draft.action}`,
-			);
-			if (triggerScore >= 0.8 && actionScore < 0.45) {
-				return false;
-			}
-			return overallScore >= 0.68 || (triggerScore >= 0.8 && actionScore >= 0.45);
-		});
-		if (overlapsKept) {
-			droppedIds.push(draft.id);
-			continue;
-		}
-		kept.push(draft);
-	}
-
-	return { drafts: kept.slice(0, 6), droppedIds };
+	const result = dedupeComparableInstincts(drafts, existingInstincts, 6);
+	return { drafts: result.kept, droppedIds: result.droppedIds };
 }
 
 function buildQualityReport(
@@ -907,7 +838,7 @@ function buildQualityReport(
 ): SkillCreateQualityReport {
 	const headingCount = (skillMarkdown.match(/^## /gmu) ?? []).length;
 	const projectSpecific = isRepoSpecificSkill(project, skillMarkdown);
-	const projectToken = normalizeForCompare(project.name);
+	const projectToken = normalizeCompareText(project.name);
 	const overlapSkills = existingSkills
 		.filter((skill) => {
 			const score = overlapScore(skillMarkdown, `${skill.name} ${skill.description}`);
@@ -918,7 +849,7 @@ function buildQualityReport(
 			if (!projectSpecific || isProjectLocal) {
 				return true;
 			}
-			const existingIdentity = normalizeForCompare(`${skill.name} ${skill.description}`);
+			const existingIdentity = normalizeCompareText(`${skill.name} ${skill.description}`);
 			return existingIdentity.includes(projectToken);
 		})
 		.map((skill) => skill.filePath)
@@ -1296,10 +1227,7 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 			title: instinct.title,
 			trigger: instinct.trigger,
 			domain: instinct.domain,
-			action: instinct.content
-				.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u)?.[1]
-				?.trim()
-				.split("\n")[0],
+			action: extractInstinctAction(instinct.content),
 		})),
 	);
 

@@ -82,6 +82,7 @@ export interface LearnEvalResult {
 		scope: InstinctScope;
 	};
 	targetPath: string | null;
+	projectRoot: string;
 	transcript: string;
 }
 
@@ -195,7 +196,7 @@ function buildLearnEvalPrompt(
 }
 
 function buildAbsorbContent(skillMarkdown: string, absorbTarget: string | undefined): string {
-	const body = skillMarkdown.replace(/^---[\s\S]*?---\s*/u, "").trim();
+	const body = stripFrontmatter(skillMarkdown);
 	return [
 		`# Suggested Additions For ${absorbTarget ?? "existing skill"}`,
 		"",
@@ -204,6 +205,31 @@ function buildAbsorbContent(skillMarkdown: string, absorbTarget: string | undefi
 		...body.split("\n").map((line) => `+ ${line}`),
 		"```",
 	].join("\n");
+}
+
+function stripFrontmatter(skillMarkdown: string): string {
+	return skillMarkdown.replace(/^---[\s\S]*?---\s*/u, "").trim();
+}
+
+async function resolveAbsorbTargetPath(result: LearnEvalResult): Promise<string | null> {
+	const target = result.quality.absorbTarget;
+	if (!target || target.trim().length === 0) {
+		return null;
+	}
+	if (target === "MEMORY.md") {
+		if (result.quality.scope === "global") {
+			return join(getAgentDir(), "MEMORY.md");
+		}
+		const projectMemoryPath = join(result.projectRoot, ".pi", "MEMORY.md");
+		if ((await readOptionalText(projectMemoryPath, 1)).length > 0) {
+			return projectMemoryPath;
+		}
+		return join(result.projectRoot, "MEMORY.md");
+	}
+	if (target.startsWith("/")) {
+		return target;
+	}
+	return join(result.projectRoot, target);
 }
 
 async function improveSkillOnce(
@@ -362,24 +388,23 @@ export async function evaluateSessionLearning(options: LearnEvalOptions): Promis
 		skillMarkdown: finalSkillMarkdown,
 		quality: finalQuality,
 		targetPath,
+		projectRoot: options.project.root,
 		transcript,
 	};
 }
 
 export async function applyLearnEvalResult(result: LearnEvalResult): Promise<void> {
 	if (result.quality.verdict === "absorb") {
-		if (
-			result.quality.absorbTarget &&
-			result.quality.absorbContent &&
-			result.quality.absorbTarget.endsWith(".md") &&
-			!result.quality.absorbTarget.endsWith("MEMORY.md")
-		) {
-			const existing = await readOptionalText(result.quality.absorbTarget, 1_000_000);
-			if (existing.length > 0 && result.skillMarkdown) {
-				const addition = result.skillMarkdown.replace(/^---[\s\S]*?---\s*/u, "").trim();
-				const next = `${existing.trimEnd()}\n\n## Learned Addition\n\n${addition}\n`;
-				await writeTextFile(result.quality.absorbTarget, next);
-			}
+		const absorbPath = await resolveAbsorbTargetPath(result);
+		if (absorbPath && result.skillMarkdown) {
+			const existing = await readOptionalText(absorbPath, 1_000_000);
+			const addition = stripFrontmatter(result.skillMarkdown);
+			const heading = absorbPath.endsWith("MEMORY.md") ? "## Learned Pattern" : "## Learned Addition";
+			const next =
+				existing.trim().length > 0
+					? `${existing.trimEnd()}\n\n${heading}\n\n${addition}\n`
+					: `${heading}\n\n${addition}\n`;
+			await writeTextFile(absorbPath, next);
 		}
 		return;
 	}
