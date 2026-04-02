@@ -106,6 +106,11 @@ pi -e ./packages/coding-agent/examples/extensions/continuous-learning-v2
 
 当 `pi` 运行在非 git 目录中时，当前实现现在会像 ECC 一样回退到 `global` scope，而不是为当前目录合成一个伪项目。
 
+项目根目录 override：
+
+- `PI_PROJECT_DIR=/path/to/project` 可显式指定当前项目根目录
+- 同时也兼容 `CLAUDE_PROJECT_DIR`，便于在 ECC 风格环境下复用
+
 ## Observer
 
 首次运行时会自动生成默认配置：
@@ -134,6 +139,12 @@ Observer 和 `/skill-create` 的模型选择顺序如下：
 
 1. 当前会话活跃模型
 2. `~/.pi/agent/settings.json` 中的默认模型（`defaultProvider` + `defaultModel`）
+
+Observer 自身的模型选择顺序是：
+
+1. 当前会话活跃模型
+2. `observer.model`，格式为 `provider/id`
+3. `~/.pi/agent/settings.json` 中的默认模型
 
 ```bash
 /observer-status

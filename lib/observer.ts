@@ -10,7 +10,7 @@ import {
 	stagePendingDrafts,
 	upsertDrafts,
 } from "./instincts.js";
-import { resolveActiveOrDefaultModel } from "./model-selection.js";
+import { resolveActivePreferredOrDefaultModel } from "./model-selection.js";
 import { loadConfig, loadObserverState, readObservations, saveObserverState } from "./storage.js";
 import type { InstinctDraft, ProjectInfo, StorageLayout } from "./types.js";
 
@@ -246,7 +246,11 @@ export async function maybeAnalyzeObservations(
 		}
 	}
 
-	const resolvedModel = await resolveActiveOrDefaultModel(ctx.model, ctx.modelRegistry);
+	const resolvedModel = await resolveActivePreferredOrDefaultModel(
+		ctx.model,
+		config.observer.model,
+		ctx.modelRegistry,
+	);
 	const model = resolvedModel.model;
 	if (!model) {
 		const result = { learned: 0, skippedReason: "no-model" } satisfies ObserverAnalysisResult;

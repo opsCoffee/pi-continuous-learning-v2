@@ -57,3 +57,37 @@ export async function resolveActiveOrDefaultModel<T extends ModelLike>(
 		source: "none",
 	};
 }
+
+export async function resolveActivePreferredOrDefaultModel<T extends ModelLike>(
+	activeModel: T | undefined,
+	preferredModelRef: string | undefined,
+	modelRegistry: ModelRegistryLike,
+): Promise<{ model: T | undefined; source: "active" | "preferred" | "settings" | "none" }> {
+	if (activeModel) {
+		return {
+			model: activeModel,
+			source: "active",
+		};
+	}
+
+	const normalizedRef = preferredModelRef?.trim();
+	if (normalizedRef?.includes("/")) {
+		const [provider, ...rest] = normalizedRef.split("/");
+		const modelId = rest.join("/");
+		if (provider && modelId) {
+			const preferred = modelRegistry.find(provider, modelId) as T | undefined;
+			if (preferred) {
+				return {
+					model: preferred,
+					source: "preferred",
+				};
+			}
+		}
+	}
+
+	const fallback = await resolveActiveOrDefaultModel<T>(undefined, modelRegistry);
+	return {
+		model: fallback.model,
+		source: fallback.source,
+	};
+}

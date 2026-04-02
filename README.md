@@ -108,6 +108,11 @@ Global config and global-scope instincts still live under:
 
 When pi is running outside a git project, Continuous Learning now falls back to `global` scope instead of inventing a synthetic project from the current directory.
 
+Project detection override:
+
+- `PI_PROJECT_DIR=/path/to/project` forces Continuous Learning to treat that directory as the current project root
+- `CLAUDE_PROJECT_DIR` is also honored for compatibility with ECC-style environments
+
 ## Observer
 
 Default config is created on first run:
@@ -146,6 +151,12 @@ Observer and `skill-create` model selection follow this order:
 
 1. current active session model
 2. `~/.pi/agent/settings.json` default model (`defaultProvider` + `defaultModel`)
+
+Observer-specific model selection follows:
+
+1. current active session model
+2. `observer.model` when configured as `provider/id`
+3. `~/.pi/agent/settings.json` default model
 
 ```bash
 /observer-status

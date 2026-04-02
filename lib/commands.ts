@@ -287,6 +287,7 @@ export function registerContinuousLearningCommands(
 				`Config interval: ${config.observer.runIntervalMinutes} min`,
 				`Min observations: ${config.observer.minObservationsToAnalyze}`,
 				`Max recent observations: ${config.observer.maxRecentObservations}`,
+				`Configured observer model: ${config.observer.model ?? "(active/settings fallback)"}`,
 			];
 			emitReport(pi, "continuous-learning-observer-status", lines.join("\n"));
 		},

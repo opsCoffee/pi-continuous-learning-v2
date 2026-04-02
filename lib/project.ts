@@ -26,9 +26,22 @@ function stripRemoteCredentials(remote: string | undefined): string | undefined 
 	return remote.replace(/:\/\/[^@]+@/u, "://");
 }
 
+function resolveProjectRootOverride(cwd: string): string | undefined {
+	const candidates = [process.env.PI_PROJECT_DIR, process.env.CLAUDE_PROJECT_DIR]
+		.map((value) => value?.trim())
+		.filter((value): value is string => Boolean(value));
+	for (const candidate of candidates) {
+		if (candidate.length > 0) {
+			return resolve(cwd, candidate);
+		}
+	}
+	return undefined;
+}
+
 export async function detectProject(cwd: string): Promise<ProjectInfo> {
 	const resolvedCwd = resolve(cwd);
-	const gitRoot = await runGit(["-C", resolvedCwd, "rev-parse", "--show-toplevel"]);
+	const overrideRoot = resolveProjectRootOverride(resolvedCwd);
+	const gitRoot = overrideRoot ?? (await runGit(["-C", resolvedCwd, "rev-parse", "--show-toplevel"]));
 	if (!gitRoot) {
 		return {
 			id: "global",
