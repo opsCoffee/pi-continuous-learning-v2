@@ -11,7 +11,13 @@ import {
 	upsertDrafts,
 } from "./instincts.js";
 import { resolveActivePreferredOrDefaultModel } from "./model-selection.js";
-import { loadConfig, loadObserverState, readObservations, saveObserverState } from "./storage.js";
+import {
+	archiveProcessedObservations,
+	loadConfig,
+	loadObserverState,
+	readObservations,
+	saveObserverState,
+} from "./storage.js";
 import type { InstinctDraft, ProjectInfo, StorageLayout } from "./types.js";
 
 const OBSERVER_SYSTEM_PROMPT = `You analyze coding-agent observations and extract reusable instincts.
@@ -342,8 +348,9 @@ export async function maybeAnalyzeObservations(
 		if (pendingDrafts.length > 0) {
 			await stagePendingDrafts(layout, project, pendingDrafts);
 		}
+		await archiveProcessedObservations(layout, observations.length);
 		await saveObserverState(layout, {
-			lastAnalyzedIndex: observations.length,
+			lastAnalyzedIndex: 0,
 			lastAnalyzedAt: new Date().toISOString(),
 		});
 		const result = { learned: drafts.length } satisfies ObserverAnalysisResult;

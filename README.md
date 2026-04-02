@@ -285,9 +285,11 @@ Recent real-project validation covered:
 - `codeql-scanner`: `/skill-create --instincts` followed by `/evolve --generate`
 - generated multi-skill outputs such as `tests` and `workspace-manifests`
 - real observer validation with active/pending split, resulting in three active atomic instincts and zero pending drafts for the sampled session
-- repeatable observer validation script:
-  - `npx tsx scripts/observer-validation.mts --mode regression`
-  - `npx tsx scripts/observer-validation.mts --mode soak --rounds 3`
+- repeatable validation scripts:
+  - `npm run validate:scope`
+  - `npm run validate:overlap`
+  - `npm run validate:observer`
+  - `npm run validate:observer:soak`
 - live command validation:
   - `/observer-status`
   - `/agent-run /tmp/ecc-manual-agent.md say hello`
@@ -305,6 +307,8 @@ This confirms the observer no longer keeps learning paraphrased duplicates acros
 Package scripts:
 
 ```bash
+npm run validate:scope
+npm run validate:overlap
 npm run validate:observer
 npm run validate:observer:soak
 ```

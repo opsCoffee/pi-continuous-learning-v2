@@ -1,0 +1,52 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@mariozechner/pi-ai": [
+        "../../../../../packages/ai/src/index.ts",
+        "./node_modules/@mariozechner/pi-ai/dist/index.js",
+        "../../../../../node_modules/@mariozechner/pi-ai/dist/index.js"
+      ],
+      "@mariozechner/pi-ai/oauth": [
+        "../../../../../packages/ai/src/oauth.ts",
+        "./node_modules/@mariozechner/pi-ai/dist/oauth.js",
+        "../../../../../node_modules/@mariozechner/pi-ai/dist/oauth.js"
+      ],
+      "@mariozechner/pi-agent-core": [
+        "../../../../../packages/agent/src/index.ts",
+        "./node_modules/@mariozechner/pi-agent-core/dist/index.js",
+        "../../../../../node_modules/@mariozechner/pi-agent-core/dist/index.js"
+      ],
+      "@mariozechner/pi-coding-agent": [
+        "../../../../../packages/coding-agent/src/index.ts",
+        "./node_modules/@mariozechner/pi-coding-agent/dist/index.js",
+        "../../../../../node_modules/@mariozechner/pi-coding-agent/dist/index.js"
+      ],
+      "@mariozechner/pi-coding-agent/hooks": [
+        "../../../../../packages/coding-agent/src/core/hooks/index.ts",
+        "./node_modules/@mariozechner/pi-coding-agent/dist/core/hooks/index.js",
+        "../../../../../node_modules/@mariozechner/pi-coding-agent/dist/core/hooks/index.js"
+      ],
+      "@mariozechner/pi-tui": [
+        "../../../../../packages/tui/src/index.ts",
+        "./node_modules/@mariozechner/pi-tui/dist/index.js",
+        "../../../../../node_modules/@mariozechner/pi-tui/dist/index.js"
+      ],
+      "@mariozechner/pi-mom": [
+        "../../../../../packages/mom/src/index.ts"
+      ],
+      "@mariozechner/pi": [
+        "../../../../../packages/pods/src/index.ts"
+      ],
+      "@mariozechner/pi-web-ui": [
+        "../../../../../packages/web-ui/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "./index.ts",
+    "./lib/**/*.ts",
+    "./scripts/**/*.mts"
+  ]
+}

@@ -302,9 +302,11 @@ scope 行为现在是：
 - `codeql-scanner` 上的 `/skill-create --instincts`
 - `codeql-scanner` 上的 `/evolve --generate`
 - observer 的真实 session 验证
-- 可重复执行的 observer 验证脚本：
-  - `npx tsx scripts/observer-validation.mts --mode regression`
-  - `npx tsx scripts/observer-validation.mts --mode soak --rounds 3`
+- 可重复执行的验证脚本：
+  - `npm run validate:scope`
+  - `npm run validate:overlap`
+  - `npm run validate:observer`
+  - `npm run validate:observer:soak`
 - 实际命令验证：
   - `/observer-status`
   - `/agent-run /tmp/ecc-manual-agent.md say hello`
@@ -329,6 +331,8 @@ observer 真实验证中，active instincts 收敛为 3 条更原子的规则，
 包内脚本：
 
 ```bash
+npm run validate:scope
+npm run validate:overlap
 npm run validate:observer
 npm run validate:observer:soak
 ```

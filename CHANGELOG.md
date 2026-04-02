@@ -9,6 +9,7 @@
 - Added agentic ECC-style `/skill-create` based on an isolated pi SDK sub-session with restricted native tools.
 - Added multi-skill evolution flow that clusters instincts and can emit multiple skills, prompt templates, and agent markdown artifacts.
 - Added repeatable observer regression/soak validation script under `scripts/observer-validation.mts`.
+- Added repeatable scope and overlap validation scripts under `scripts/scope-validation.mts` and `scripts/overlap-validation.mts`.
 - Added `/observer-status` for observer runtime visibility and `/agent-run` as an explicit manual execution entrypoint for evolved agent artifacts.
 
 ### Changed
@@ -24,6 +25,10 @@
 - Changed project detection to fall back to `global` scope outside git projects instead of hashing the current directory into a synthetic project.
 - Changed project detection to honor `PI_PROJECT_DIR` and `CLAUDE_PROJECT_DIR` as explicit project root overrides.
 - Changed observer model selection so `observer.model` is used as a dedicated fallback before the global default model.
+- Changed observer processing to archive analyzed observations while preserving new observations appended during analysis.
+- Changed `/prune` to scan pending instincts across all registered projects.
+- Changed global fallback project-only instinct loading to reuse global instincts instead of returning an empty set.
+- Changed `/skill-create --instincts` so global-scope repo-analysis instincts resolve to the global instinct directory.
 - Changed documentation to reflect the current pi-native alignment with ECC semantics and the verified multi-skill evolution workflow.
 
 ## [0.0.1] - 2026-04-02

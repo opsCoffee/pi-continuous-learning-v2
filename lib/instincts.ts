@@ -164,7 +164,10 @@ async function loadPendingInstinctsFromDir(dirPath: string, scopeLabel: Instinct
 
 export async function loadProjectOnlyInstincts(layout: StorageLayout): Promise<LoadedInstinct[]> {
 	if (layout.isGlobalProject) {
-		return [];
+		return [
+			...(await loadInstinctsFromDir(layout.globalPersonalDir, "personal", "global")),
+			...(await loadInstinctsFromDir(layout.globalInheritedDir, "inherited", "global")),
+		];
 	}
 	const personal = await loadInstinctsFromDir(layout.projectPersonalDir, "personal", "project");
 	const inherited = await loadInstinctsFromDir(layout.projectInheritedDir, "inherited", "project");
@@ -473,6 +476,36 @@ export interface PendingInstinctInfo {
 	ageDays: number;
 }
 
+async function collectPendingDirs(
+	layout: StorageLayout,
+	includeAllProjects: boolean,
+): Promise<Array<{ dir: string; scope: InstinctScope }>> {
+	const dirs = new Map<string, InstinctScope>();
+	const addDir = (dir: string, scope: InstinctScope) => {
+		if (!dirs.has(dir)) {
+			dirs.set(dir, scope);
+		}
+	};
+
+	if (layout.isGlobalProject) {
+		addDir(layout.globalPendingDir, "global");
+	} else {
+		addDir(layout.projectPendingDir, "project");
+		addDir(layout.globalPendingDir, "global");
+	}
+
+	if (!includeAllProjects) {
+		return Array.from(dirs.entries()).map(([dir, scope]) => ({ dir, scope }));
+	}
+
+	const registry = await loadProjectRegistry(layout);
+	for (const project of Object.values(registry)) {
+		addDir(join(project.root, ".pi", "continuous-learning-v2", "instincts", "pending"), "project");
+	}
+
+	return Array.from(dirs.entries()).map(([dir, scope]) => ({ dir, scope }));
+}
+
 async function parsePendingCreatedDate(filePath: string): Promise<Date | null> {
 	try {
 		const raw = await readFile(filePath, "utf-8");
@@ -492,13 +525,11 @@ async function parsePendingCreatedDate(filePath: string): Promise<Date | null> {
 	}
 }
 
-export async function collectPendingInstincts(layout: StorageLayout): Promise<PendingInstinctInfo[]> {
-	const dirs: Array<{ dir: string; scope: InstinctScope }> = layout.isGlobalProject
-		? [{ dir: layout.globalPendingDir, scope: "global" }]
-		: [
-				{ dir: layout.projectPendingDir, scope: "project" },
-				{ dir: layout.globalPendingDir, scope: "global" },
-			];
+export async function collectPendingInstincts(
+	layout: StorageLayout,
+	options?: { includeAllProjects?: boolean },
+): Promise<PendingInstinctInfo[]> {
+	const dirs = await collectPendingDirs(layout, options?.includeAllProjects ?? false);
 	const now = Date.now();
 	const results: PendingInstinctInfo[] = [];
 	for (const { dir, scope } of dirs) {
@@ -533,7 +564,7 @@ export async function prunePendingInstincts(
 	maxAge: number = PENDING_TTL_DAYS,
 	dryRun: boolean = false,
 ): Promise<{ pruned: PendingInstinctInfo[]; remaining: PendingInstinctInfo[] }> {
-	const pending = await collectPendingInstincts(layout);
+	const pending = await collectPendingInstincts(layout, { includeAllProjects: true });
 	const pruned = pending.filter((item) => item.ageDays >= maxAge);
 	const remaining = pending.filter((item) => item.ageDays < maxAge);
 	if (!dryRun) {

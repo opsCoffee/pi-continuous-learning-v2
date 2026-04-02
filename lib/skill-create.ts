@@ -1118,6 +1118,17 @@ function resolveSkillOutputPath(project: ProjectInfo, layout: StorageLayout, out
 	return join(resolvedOutput, skillDirName, "SKILL.md");
 }
 
+export function resolveInstinctOutputDir(
+	layout: StorageLayout,
+	project: ProjectInfo,
+	instinct: LlmInstinctDraft,
+): string {
+	if (project.id === "global" || instinct.scope === "global") {
+		return layout.globalPersonalDir;
+	}
+	return layout.projectPersonalDir;
+}
+
 export async function createSkillFromRepository(options: SkillCreateOptions): Promise<SkillCreateResult> {
 	const repoRoot = await git(["-C", options.project.root, "rev-parse", "--show-toplevel"], options.cwd);
 	const entries = await collectGitHistory(repoRoot, options.commits);
@@ -1336,7 +1347,10 @@ export async function createSkillFromRepository(options: SkillCreateOptions): Pr
 	const instinctPaths: string[] = [];
 	if (options.includeInstincts) {
 		for (const instinct of dedupedInstincts.drafts) {
-			const filePath = join(options.layout.projectPersonalDir, `${instinct.id}.md`);
+			const filePath = join(
+				resolveInstinctOutputDir(options.layout, options.project, instinct),
+				`${instinct.id}.md`,
+			);
 			await writeTextFile(filePath, serializeInstinctDraft(options.project, instinct));
 			instinctPaths.push(filePath);
 		}

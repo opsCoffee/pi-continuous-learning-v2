@@ -194,6 +194,50 @@ export async function countObservationLines(layout: StorageLayout): Promise<numb
 	return observations.length;
 }
 
+export async function archiveProcessedObservations(
+	layout: StorageLayout,
+	processedCount: number,
+): Promise<{ archivedCount: number; remainingCount: number; archivePath?: string }> {
+	if (processedCount <= 0) {
+		const remaining = await countObservationLines(layout);
+		return { archivedCount: 0, remainingCount: remaining };
+	}
+
+	await mkdir(dirname(layout.observationsPath), { recursive: true });
+	return withFileMutationQueue(layout.observationsPath, async () => {
+		const current = await readFileSafe(layout.observationsPath);
+		const lines = current
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0);
+		if (lines.length === 0) {
+			return { archivedCount: 0, remainingCount: 0 };
+		}
+
+		const archivedLines = lines.slice(0, processedCount);
+		const remainingLines = lines.slice(processedCount);
+		if (archivedLines.length === 0) {
+			return { archivedCount: 0, remainingCount: remainingLines.length };
+		}
+
+		const archiveDir = join(layout.projectStateDir, "observations.archive");
+		await mkdir(archiveDir, { recursive: true });
+		const suffix = `${new Date().toISOString().replace(/[:.]/gu, "-")}-${Math.random().toString(36).slice(2, 8)}`;
+		const archivePath = join(archiveDir, `processed-${suffix}.jsonl`);
+		await writeFile(archivePath, withTrailingNewline(archivedLines.join("\n")), "utf-8");
+		await writeFile(
+			layout.observationsPath,
+			remainingLines.length > 0 ? withTrailingNewline(remainingLines.join("\n")) : "",
+			"utf-8",
+		);
+		return {
+			archivedCount: archivedLines.length,
+			remainingCount: remainingLines.length,
+			archivePath,
+		};
+	});
+}
+
 export async function writeTextFile(filePath: string, content: string): Promise<void> {
 	await mkdir(dirname(filePath), { recursive: true });
 	await withFileMutationQueue(filePath, async () => {
