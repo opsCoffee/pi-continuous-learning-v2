@@ -1,5 +1,5 @@
-import { readFile, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readdir, readFile, rm } from "node:fs/promises";
+import { extname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { runEvolvedAgent } from "./evolved-agent-runner.js";
 import {
@@ -20,7 +20,14 @@ import { applyLearnEvalResult, evaluateSessionLearning } from "./learn-eval.js";
 import { resolveActiveOrDefaultModel } from "./model-selection.js";
 import type { ObserverRuntimeState } from "./observer.js";
 import { createSkillFromRepository } from "./skill-create.js";
-import { countObservationLines, loadConfig, loadObserverState, loadProjectRegistry, writeTextFile } from "./storage.js";
+import {
+	countObservationLines,
+	getStorageLayout,
+	loadConfig,
+	loadObserverState,
+	loadProjectRegistry,
+	writeTextFile,
+} from "./storage.js";
 import type {
 	AgentRunMessageDetails,
 	LearnEvalMessageDetails,
@@ -176,6 +183,19 @@ function formatRelativeMs(ms: number): string {
 
 function formatOptionalTimestamp(value: string | undefined): string {
 	return value ?? "(never)";
+}
+
+const INSTINCT_FILE_EXTENSIONS = new Set([".md", ".yaml", ".yml"]);
+
+async function countInstinctFiles(dirPath: string): Promise<number> {
+	try {
+		const entries = await readdir(dirPath, { withFileTypes: true });
+		return entries.filter(
+			(entry) => entry.isFile() && INSTINCT_FILE_EXTENSIONS.has(extname(entry.name).toLowerCase()),
+		).length;
+	} catch {
+		return 0;
+	}
 }
 
 async function loadImportSource(source: string, cwd: string): Promise<string> {
@@ -379,15 +399,28 @@ export function registerContinuousLearningCommands(
 	pi.registerCommand("promote", {
 		description: "Promote project instincts to global scope",
 		handler: async (args, ctx) => {
-			const { layout } = getState();
-			if (!layout) {
+			const { project, layout } = getState();
+			if (!project || !layout) {
 				return;
 			}
 			const parsed = parseArgs(args);
 			const instinctId = parsed.positionals[0];
 			const dryRun = parsed.flags.has("dry-run");
 			const force = parsed.flags.has("force");
+			const globalInstincts = await loadProjectOnlyInstincts(
+				getStorageLayout({
+					id: "global",
+					name: "global",
+					root: project.root,
+				}),
+			);
+			const globalIds = new Set(globalInstincts.map((instinct) => instinct.id));
+			if (instinctId && globalIds.has(instinctId)) {
+				ctx.ui.notify(`Instinct '${instinctId}' already exists in global scope`, "info");
+				return;
+			}
 			let targetCandidates = await findPromotionCandidates(layout);
+			targetCandidates = targetCandidates.filter((candidate) => !globalIds.has(candidate.id));
 			if (instinctId) {
 				const projectInstincts = await loadProjectOnlyInstincts(layout);
 				const specific = projectInstincts.find((instinct) => instinct.id === instinctId);
@@ -455,14 +488,35 @@ export function registerContinuousLearningCommands(
 			for (const entry of Object.values(registry).sort((left, right) =>
 				right.lastSeen.localeCompare(left.lastSeen),
 			)) {
+				const projectLayout = getStorageLayout({
+					id: entry.id,
+					name: entry.name,
+					root: entry.root,
+					remote: entry.remote,
+				});
+				const [personalCount, inheritedCount, observationCount] = await Promise.all([
+					countInstinctFiles(projectLayout.projectPersonalDir),
+					countInstinctFiles(projectLayout.projectInheritedDir),
+					countObservationLines(projectLayout),
+				]);
 				lines.push(`${entry.name} [${entry.id}]`);
 				lines.push(`root: ${entry.root}`);
 				if (entry.remote) {
 					lines.push(`remote: ${entry.remote}`);
 				}
+				lines.push(`personal instincts: ${personalCount}`);
+				lines.push(`inherited instincts: ${inheritedCount}`);
+				lines.push(`observations: ${observationCount}`);
 				lines.push(`last seen: ${entry.lastSeen}`);
 				lines.push("");
 			}
+			const [globalPersonalCount, globalInheritedCount] = await Promise.all([
+				countInstinctFiles(layout.globalPersonalDir),
+				countInstinctFiles(layout.globalInheritedDir),
+			]);
+			lines.push("GLOBAL TOTALS");
+			lines.push(`global personal instincts: ${globalPersonalCount}`);
+			lines.push(`global inherited instincts: ${globalInheritedCount}`);
 			emitReport(pi, "continuous-learning-projects", lines.join("\n"));
 		},
 	});
