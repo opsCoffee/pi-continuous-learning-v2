@@ -184,6 +184,7 @@ Observer 当前行为：
   - 现有 skills 重叠
   - 现有 instincts 重叠
   - `MEMORY.md` 重叠
+- overlap 判断现在会同时参考现有 skill 的标题、章节、列表动作和正文摘要，而不只是元信息
 - 当活跃模型或默认模型无法给出有效结果时，回退到本地 fallback summarizer
 
 ### 可能的质量判定
@@ -221,6 +222,7 @@ Observer 当前行为：
 交互模式下，`/learn-eval` 现在有专用自定义渲染，会按 verdict 展示 checklist、改进项、吸收内容和 draft skill。
 
 当 verdict 为 `absorb` 且目标是 `MEMORY.md` 时，插件会按 project/global scope 解析实际 MEMORY 路径，并直接把 learned pattern 追加进去，而不是只给建议文本。
+本地 overlap 检查现在也会读取现有 skill 的正文摘要，因此对“短描述不同但正文高度相似”的 skill 更容易正确吸收而不是重复保存。
 
 ## /evolve
 

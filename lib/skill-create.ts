@@ -12,6 +12,7 @@ import {
 	overlapScore,
 } from "./instinct-quality.js";
 import { loadProjectOnlyInstincts, serializeInstinct } from "./instincts.js";
+import { detectOverlappingSkills, type ExistingSkillReference } from "./skill-overlap.js";
 import { writeTextFile } from "./storage.js";
 import type { ProjectInfo, SkillCreateQualityReport, StorageLayout } from "./types.js";
 
@@ -117,12 +118,7 @@ interface FileCount {
 	count: number;
 }
 
-interface ExistingSkillSummary {
-	name: string;
-	description: string;
-	filePath: string;
-	bodyPreview: string;
-}
+type ExistingSkillSummary = ExistingSkillReference;
 
 interface SkillCreateLlmContext {
 	model: Model<any>;
@@ -845,19 +841,25 @@ function buildQualityReport(
 	const projectSpecific = isRepoSpecificSkill(project, skillMarkdown);
 	const projectToken = normalizeCompareText(project.name);
 	const overlapSkills = existingSkills
-		.filter((skill) => {
-			const score = overlapScore(skillMarkdown, `${skill.name} ${skill.description} ${skill.bodyPreview}`);
-			if (score < 0.35) {
+		.map((skill) => ({
+			skill,
+			match: detectOverlappingSkills(skillMarkdown, [skill], { limit: 1, threshold: 0.52 })[0],
+		}))
+		.filter((entry) => {
+			if (!entry.match) {
 				return false;
 			}
-			const isProjectLocal = skill.filePath.startsWith(project.root);
+			const isProjectLocal = entry.skill.filePath.startsWith(project.root);
 			if (!projectSpecific || isProjectLocal) {
 				return true;
 			}
-			const existingIdentity = normalizeCompareText(`${skill.name} ${skill.description} ${skill.bodyPreview}`);
+			const existingIdentity = normalizeCompareText(
+				`${entry.skill.name} ${entry.skill.description} ${entry.skill.bodyPreview}`,
+			);
 			return existingIdentity.includes(projectToken);
 		})
-		.map((skill) => skill.filePath)
+		.sort((left, right) => (right.match?.score ?? 0) - (left.match?.score ?? 0))
+		.map((entry) => entry.skill.filePath)
 		.slice(0, 3);
 	const memoryOverlap =
 		(projectMemory.length > 0 && overlapScore(skillMarkdown, projectMemory) >= 0.35) ||

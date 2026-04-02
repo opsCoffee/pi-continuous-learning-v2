@@ -179,6 +179,7 @@ The generation flow uses:
 - restricted native tools for git-history inspection, file discovery, grep, read, and artifact saving
 - transcript synthesis as a recovery path when the sub-session does not save final artifacts directly
 - a `learn-eval`-style quality gate that checks overlap with existing skills, existing instincts, and `MEMORY.md` before saving
+- overlap checks now combine existing skill title, headings, bullet actions, and body preview instead of relying only on skill metadata
 - a generic local fallback summarizer when the active or default model cannot produce usable artifacts
 
 `/skill-create` may return these quality verdicts:
@@ -214,6 +215,7 @@ By default it reports the draft and verdict. In interactive mode it asks for con
 Interactive `learn-eval` results use a dedicated custom renderer with verdict-specific sections for checklist, absorb content, improvements, and the draft skill.
 
 When the verdict is `absorb` and the target is `MEMORY.md`, the plugin now appends the learned pattern to the resolved project or global MEMORY file instead of only reporting a suggestion.
+Local overlap checks now read existing skill body previews as well, so absorb/drop decisions are less likely to miss semantically similar skills with different short descriptions.
 
 ## Evolve
 

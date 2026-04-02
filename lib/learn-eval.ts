@@ -9,6 +9,7 @@ import {
 	parseFrontmatter,
 	serializeConversation,
 } from "@mariozechner/pi-coding-agent";
+import { detectOverlappingSkills, type ExistingSkillReference } from "./skill-overlap.js";
 import { writeTextFile } from "./storage.js";
 import type { InstinctScope, ProjectInfo, SkillCreateQualityReport } from "./types.js";
 
@@ -53,12 +54,7 @@ Rules:
   - Solution
   - When to Use`;
 
-interface ExistingSkillSummary {
-	name: string;
-	description: string;
-	filePath: string;
-	bodyPreview: string;
-}
+type ExistingSkillSummary = ExistingSkillReference;
 
 export interface LearnEvalLlmContext {
 	model: Model<any>;
@@ -381,6 +377,28 @@ export async function evaluateSessionLearning(options: LearnEvalOptions): Promis
 
 	if (finalQuality.verdict === "absorb" && finalSkillMarkdown) {
 		finalQuality.absorbContent = buildAbsorbContent(finalSkillMarkdown, finalQuality.absorbTarget);
+	}
+
+	if (finalSkillMarkdown && finalQuality.verdict !== "drop") {
+		const overlaps = detectOverlappingSkills(finalSkillMarkdown, existingSkills, { limit: 3, threshold: 0.52 });
+		if (overlaps.length > 0 && finalQuality.verdict !== "absorb") {
+			finalQuality.verdict = "absorb";
+			finalQuality.absorbTarget = overlaps[0]?.filePath;
+			finalQuality.rationale =
+				finalQuality.rationale.length > 0
+					? `${finalQuality.rationale} 本地 overlap 检查还发现与现有 skill 正文存在较强重叠。`
+					: "本地 overlap 检查发现与现有 skill 正文存在较强重叠。";
+		}
+		if (overlaps.length > 0) {
+			finalQuality.overlapSkills = overlaps.map((item) => item.filePath);
+			finalQuality.checklist = [
+				...finalQuality.checklist,
+				`local skill overlap: ${overlaps.map((item) => item.filePath).join(", ")}`,
+			];
+			if (finalQuality.verdict === "absorb") {
+				finalQuality.absorbContent = buildAbsorbContent(finalSkillMarkdown, finalQuality.absorbTarget);
+			}
+		}
 	}
 
 	const slugSource =
