@@ -37,6 +37,7 @@ Rules:
 - Never include raw code snippets
 - Prefer atomic, clusterable instincts over broad summary rules
 - It is acceptable for multiple instincts to share the same trigger when they capture distinct steps or checks in the same workflow
+- Do not emit paraphrased duplicates for the same concept. Choose one wording and one instinct id per concept
 - Reuse existing instinct IDs only when the trigger and action are materially the same
 - Avoid generic instincts like "follow repo conventions" or "write better tests"
 - If evidence is tentative, still return the instinct with lower confidence rather than inventing a broad confident rule
@@ -164,6 +165,82 @@ function parseDrafts(text: string): InstinctDraft[] {
 	}
 }
 
+function normalizeForCompare(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/[`*_>#-]/gu, " ")
+		.replace(/\s+/gu, " ")
+		.trim();
+}
+
+function tokenize(value: string): Set<string> {
+	return new Set(
+		normalizeForCompare(value)
+			.split(" ")
+			.filter((token) => token.length >= 3),
+	);
+}
+
+function overlapScore(left: string, right: string): number {
+	const leftTokens = tokenize(left);
+	const rightTokens = tokenize(right);
+	if (leftTokens.size === 0 || rightTokens.size === 0) {
+		return 0;
+	}
+	let overlap = 0;
+	for (const token of leftTokens) {
+		if (rightTokens.has(token)) {
+			overlap++;
+		}
+	}
+	return overlap / Math.min(leftTokens.size, rightTokens.size);
+}
+
+function dedupeDrafts(drafts: InstinctDraft[]): InstinctDraft[] {
+	const kept: InstinctDraft[] = [];
+	for (const draft of drafts.sort((left, right) => right.confidence - left.confidence)) {
+		const duplicate = kept.some((existing) => {
+			const triggerScore = overlapScore(existing.trigger, draft.trigger);
+			const actionScore = overlapScore(existing.action, draft.action);
+			const overallScore = overlapScore(
+				`${existing.title} ${existing.trigger} ${existing.action}`,
+				`${draft.title} ${draft.trigger} ${draft.action}`,
+			);
+			if (triggerScore >= 0.8 && actionScore < 0.45) {
+				return false;
+			}
+			return overallScore >= 0.72 || (triggerScore >= 0.8 && actionScore >= 0.55);
+		});
+		if (!duplicate) {
+			kept.push(draft);
+		}
+	}
+	return kept;
+}
+
+function filterDraftsAgainstExisting(
+	drafts: InstinctDraft[],
+	existing: Array<{ id: string; trigger: string; action: string }>,
+): InstinctDraft[] {
+	return drafts.filter((draft) => {
+		return !existing.some((instinct) => {
+			if (instinct.id === draft.id) {
+				return false;
+			}
+			const triggerScore = overlapScore(instinct.trigger, draft.trigger);
+			const actionScore = overlapScore(instinct.action, draft.action);
+			const overallScore = overlapScore(
+				`${instinct.trigger} ${instinct.action}`,
+				`${draft.trigger} ${draft.action}`,
+			);
+			if (triggerScore >= 0.8 && actionScore < 0.45) {
+				return false;
+			}
+			return overallScore >= 0.72 || (triggerScore >= 0.8 && actionScore >= 0.55);
+		});
+	});
+}
+
 function formatObservationForPrompt(observation: {
 	event: string;
 	inputText?: string;
@@ -281,7 +358,18 @@ export async function maybeAnalyzeObservations(
 			.filter((item): item is { type: "text"; text: string } => item.type === "text")
 			.map((item) => item.text)
 			.join("\n");
-		const drafts = parseDrafts(text);
+		const drafts = filterDraftsAgainstExisting(
+			dedupeDrafts(parseDrafts(text)),
+			[...existingInstincts, ...pendingInstincts].map((instinct) => ({
+				id: instinct.id,
+				trigger: instinct.trigger,
+				action:
+					instinct.content
+						.match(/## Action\s+([\s\S]*?)(?:\n## |\n*$)/u)?.[1]
+						?.trim()
+						.split("\n")[0] ?? "",
+			})),
+		);
 		const activeDrafts = drafts.filter((draft) => draft.confidence >= 0.7);
 		const pendingDrafts = drafts.filter((draft) => draft.confidence < 0.7);
 		if (activeDrafts.length > 0) {

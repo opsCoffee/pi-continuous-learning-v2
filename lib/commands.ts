@@ -220,7 +220,7 @@ export function registerContinuousLearningCommands(
 
 	pi.registerCommand("instinct-import", {
 		description: "Import instincts from a file or URL",
-		handler: async (args, _ctx) => {
+		handler: async (args, ctx) => {
 			const { project, layout } = getState();
 			if (!project || !layout) {
 				return;
@@ -261,7 +261,7 @@ export function registerContinuousLearningCommands(
 
 	pi.registerCommand("promote", {
 		description: "Promote project instincts to global scope",
-		handler: async (args, _ctx) => {
+		handler: async (args, ctx) => {
 			const { layout } = getState();
 			if (!layout) {
 				return;

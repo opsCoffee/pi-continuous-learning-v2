@@ -17,8 +17,10 @@ It provides:
 - observation capture from pi extension events
 - project-scoped and global instinct storage
 - background observer analysis while a pi session is running
+- pending instinct staging and TTL-based pruning
 - instinct management commands
-- evolved skills and prompt templates
+- ECC-aligned `/skill-create`, `/learn-eval`, and `/evolve --generate`
+- evolved skills, prompt templates, and agent markdown artifacts
 
 It does not modify `pi-mono` core logic.
 
@@ -61,9 +63,20 @@ pi -e ./packages/coding-agent/examples/extensions/continuous-learning-v2
 - `/prune`
 - `/instinct-prune`
 
+## ECC Alignment
+
+This package follows ECC's behavior where it fits `pi` natively:
+
+- `Continuous Learning v2` runs as a pi extension instead of Claude hook scripts
+- `/skill-create` stays repo-level and uses an isolated pi SDK sub-session with restricted native tools
+- `/skill-create --instincts` produces smaller repo-analysis instincts for later evolution
+- `/evolve --generate` is responsible for splitting multi-topic instinct clusters into multiple skills
+- `/learn-eval` exists as a standalone command
+- observer output prefers atomic, clusterable instincts and stages low-confidence drafts into `pending/`
+
 ## Storage
 
-Project-scoped state and generated artifacts now default to the current project's `.pi/` directory.
+Project-scoped state and generated artifacts default to the current project's `.pi/` directory.
 
 Project-scoped state:
 
@@ -119,7 +132,9 @@ Observer behavior:
 
 - higher-confidence observer instincts are written into active instinct storage
 - lower-confidence observer instincts are staged under `instincts/pending/`
-- `/prune` removes expired pending instincts (default TTL: 30 days)
+- `/prune` removes expired pending instincts with a 30-day default TTL
+- observer prompts include existing active and pending instincts to reduce near-duplicate learning
+- observer output is filtered toward atomic, reusable rules that are easier to evolve into skills
 
 Observer and `skill-create` model selection follow this order:
 
@@ -136,6 +151,7 @@ Observer and `skill-create` model selection follow this order:
 ```
 
 `/skill-create` analyzes local git history and generates a repository skill.
+
 Without `--output`, the generated skill defaults to the project's `.pi/skills/`.
 
 With `--instincts`, it also writes repo-analysis instincts into the current project's instinct store.
@@ -144,8 +160,9 @@ The generation flow uses:
 
 - an isolated pi SDK sub-session that mirrors ECC's `/skill-create` workflow
 - restricted native tools for git-history inspection, file discovery, grep, read, and artifact saving
-- a `learn-eval`-style quality gate that checks overlap with existing skills, existing instincts, and MEMORY.md before saving
-- a generic local fallback summarizer when the active/default model cannot produce usable artifacts
+- transcript synthesis as a recovery path when the sub-session does not save final artifacts directly
+- a `learn-eval`-style quality gate that checks overlap with existing skills, existing instincts, and `MEMORY.md` before saving
+- a generic local fallback summarizer when the active or default model cannot produce usable artifacts
 
 `/skill-create` may return these quality verdicts:
 
@@ -158,8 +175,10 @@ Verdict behavior:
 
 - `save`: writes the skill and optional instincts
 - `improve-then-save`: performs one automatic revision pass, then re-evaluates before saving
-- `absorb`: does not write a new skill; returns absorb target and appendable content suggestion
+- `absorb`: does not write a new skill and returns an absorb target plus appendable content suggestion
 - `drop`: does not write a new skill
+
+`/skill-create --instincts` is optimized for later `/evolve --generate` runs. The generated repo-analysis instincts are intentionally smaller and more clusterable than the repo-level skill.
 
 ## Learn Eval
 
@@ -175,9 +194,47 @@ Verdict behavior:
 
 By default it reports the draft and verdict. In interactive mode it asks for confirmation before saving or absorbing. In non-interactive mode, use `--apply` or `--force` to write the result.
 
+## Evolve
+
+```bash
+/evolve
+/evolve --generate
+```
+
+`/evolve --generate` clusters related instincts and can emit multiple outputs from the same project:
+
+- multiple skills when the instinct set spans different themes
+- prompt templates that become native slash commands in pi
+- agent markdown artifacts for later consumption
+
+This matches ECC's division of labor more closely:
+
+- `/skill-create`: one repo-level skill
+- `/evolve --generate`: multiple evolved skills from instinct clusters
+
+## Prune
+
+```bash
+/prune
+/prune --dry-run
+```
+
+`/prune` removes expired pending instincts only. It does not touch active project or global instincts.
+
+`/instinct-prune` remains available as a separate de-duplication command for active project instincts.
+
+## Validation Snapshot
+
+Recent real-project validation covered:
+
+- `codeql-scanner`: `/skill-create --instincts` followed by `/evolve --generate`
+- generated multi-skill outputs such as `tests` and `workspace-manifests`
+- real observer validation with active/pending split, resulting in three active atomic instincts and zero pending drafts for the sampled session
+
 ## Notes
 
 - The observer runs inside the active pi process. It does not spawn a detached daemon.
 - Evolved commands are generated as pi prompt templates, which makes them native slash commands in pi.
 - Evolved agents are generated as markdown artifacts only. They are not auto-executed.
 - `continuous-learning-skill-create` messages have a custom renderer in interactive mode.
+- Root-level `npm run check` in `pi-mono` is currently blocked by existing `packages/web-ui` issues. Plugin validation is done with submodule-local checks and targeted real-session tests.
