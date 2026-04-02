@@ -21,6 +21,7 @@
 - Changed promotion candidate scanning to read the current project-local `.pi/continuous-learning-v2` storage layout from the registry instead of the legacy `rootDir/projects` layout.
 - Changed `/evolve --generate` to emit project/global outputs into the matching evolved directory instead of always writing to the current project.
 - Changed overlap detection in `skill-create` and `learn-eval` to use existing skill body previews and section-level signals instead of only short metadata.
+- Changed project detection to fall back to `global` scope outside git projects instead of hashing the current directory into a synthetic project.
 - Changed documentation to reflect the current pi-native alignment with ECC semantics and the verified multi-skill evolution workflow.
 
 ## [0.0.1] - 2026-04-02

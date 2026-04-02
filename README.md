@@ -106,6 +106,8 @@ Global config and global-scope instincts still live under:
 ~/.pi/agent/continuous-learning-v2/
 ```
 
+When pi is running outside a git project, Continuous Learning now falls back to `global` scope instead of inventing a synthetic project from the current directory.
+
 ## Observer
 
 Default config is created on first run:

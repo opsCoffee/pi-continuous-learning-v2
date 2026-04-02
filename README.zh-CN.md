@@ -104,6 +104,8 @@ pi -e ./packages/coding-agent/examples/extensions/continuous-learning-v2
 ~/.pi/agent/continuous-learning-v2/
 ```
 
+当 `pi` 运行在非 git 目录中时，当前实现现在会像 ECC 一样回退到 `global` scope，而不是为当前目录合成一个伪项目。
+
 ## Observer
 
 首次运行时会自动生成默认配置：

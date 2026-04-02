@@ -50,8 +50,10 @@ function normalizeConfig(config: Partial<ContinuousLearningConfig> | undefined):
 
 export function getStorageLayout(project: ProjectInfo): StorageLayout {
 	const rootDir = join(getAgentDir(), "continuous-learning-v2");
-	const projectStateDir = join(project.root, ".pi", "continuous-learning-v2");
+	const isGlobal = project.id === "global";
+	const projectStateDir = isGlobal ? rootDir : join(project.root, ".pi", "continuous-learning-v2");
 	const projectDir = projectStateDir;
+	const globalFallbackInstinctsDir = join(rootDir, "instincts", "_global_fallback");
 	return {
 		rootDir,
 		configPath: join(rootDir, "config.json"),
@@ -64,19 +66,26 @@ export function getStorageLayout(project: ProjectInfo): StorageLayout {
 		globalEvolvedAgentsDir: join(rootDir, "evolved", "agents"),
 		projectStateDir,
 		projectDir,
-		projectMetadataPath: join(projectDir, "project.json"),
-		projectPersonalDir: join(projectDir, "instincts", "personal"),
-		projectInheritedDir: join(projectDir, "instincts", "inherited"),
-		projectPendingDir: join(projectDir, "instincts", "pending"),
-		projectEvolvedSkillsDir: join(project.root, ".pi", "skills"),
-		projectEvolvedPromptsDir: join(project.root, ".pi", "prompts"),
-		projectEvolvedAgentsDir: join(project.root, ".pi", "agents"),
-		observationsPath: join(projectDir, "observations.jsonl"),
-		observerStatePath: join(projectDir, "observer-state.json"),
+		projectMetadataPath: isGlobal ? join(rootDir, "global-project.json") : join(projectDir, "project.json"),
+		projectPersonalDir: isGlobal
+			? join(globalFallbackInstinctsDir, "personal")
+			: join(projectDir, "instincts", "personal"),
+		projectInheritedDir: isGlobal
+			? join(globalFallbackInstinctsDir, "inherited")
+			: join(projectDir, "instincts", "inherited"),
+		projectPendingDir: isGlobal
+			? join(globalFallbackInstinctsDir, "pending")
+			: join(projectDir, "instincts", "pending"),
+		projectEvolvedSkillsDir: isGlobal ? join(rootDir, "evolved", "skills") : join(project.root, ".pi", "skills"),
+		projectEvolvedPromptsDir: isGlobal ? join(rootDir, "evolved", "prompts") : join(project.root, ".pi", "prompts"),
+		projectEvolvedAgentsDir: isGlobal ? join(rootDir, "evolved", "agents") : join(project.root, ".pi", "agents"),
+		observationsPath: isGlobal ? join(rootDir, "observations.jsonl") : join(projectDir, "observations.jsonl"),
+		observerStatePath: isGlobal ? join(rootDir, "observer-state.json") : join(projectDir, "observer-state.json"),
 	};
 }
 
 export async function ensureStorage(project: ProjectInfo, layout: StorageLayout): Promise<void> {
+	const isGlobal = project.id === "global";
 	await mkdir(layout.rootDir, { recursive: true });
 	await mkdir(layout.globalPersonalDir, { recursive: true });
 	await mkdir(layout.globalInheritedDir, { recursive: true });
@@ -101,24 +110,26 @@ export async function ensureStorage(project: ProjectInfo, layout: StorageLayout)
 	});
 	await writeJsonFile(layout.observerStatePath, observerState);
 
-	const now = new Date().toISOString();
-	const currentProject: ProjectRegistryEntry = {
-		id: project.id,
-		name: project.name,
-		root: project.root,
-		remote: project.remote,
-		createdAt: now,
-		lastSeen: now,
-	};
+	if (!isGlobal) {
+		const now = new Date().toISOString();
+		const currentProject: ProjectRegistryEntry = {
+			id: project.id,
+			name: project.name,
+			root: project.root,
+			remote: project.remote,
+			createdAt: now,
+			lastSeen: now,
+		};
 
-	const registry = await readJsonFile<Record<string, ProjectRegistryEntry>>(layout.registryPath, {});
-	const existing = registry[project.id];
-	registry[project.id] = {
-		...currentProject,
-		createdAt: existing?.createdAt ?? currentProject.createdAt,
-	};
-	await writeJsonFile(layout.registryPath, registry);
-	await writeJsonFile(layout.projectMetadataPath, registry[project.id]);
+		const registry = await readJsonFile<Record<string, ProjectRegistryEntry>>(layout.registryPath, {});
+		const existing = registry[project.id];
+		registry[project.id] = {
+			...currentProject,
+			createdAt: existing?.createdAt ?? currentProject.createdAt,
+		};
+		await writeJsonFile(layout.registryPath, registry);
+		await writeJsonFile(layout.projectMetadataPath, registry[project.id]);
+	}
 }
 
 export async function loadConfig(layout: StorageLayout): Promise<ContinuousLearningConfig> {

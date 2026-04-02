@@ -28,7 +28,14 @@ function stripRemoteCredentials(remote: string | undefined): string | undefined 
 
 export async function detectProject(cwd: string): Promise<ProjectInfo> {
 	const resolvedCwd = resolve(cwd);
-	const gitRoot = (await runGit(["-C", resolvedCwd, "rev-parse", "--show-toplevel"])) ?? resolvedCwd;
+	const gitRoot = await runGit(["-C", resolvedCwd, "rev-parse", "--show-toplevel"]);
+	if (!gitRoot) {
+		return {
+			id: "global",
+			name: "global",
+			root: resolvedCwd,
+		};
+	}
 	const remote = stripRemoteCredentials(await runGit(["-C", gitRoot, "remote", "get-url", "origin"]));
 	const projectHashSource = remote ?? gitRoot;
 	const id = createHash("sha256").update(projectHashSource).digest("hex").slice(0, 12);
