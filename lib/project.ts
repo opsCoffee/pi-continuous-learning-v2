@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ProjectInfo } from "./types.js";
@@ -26,13 +27,24 @@ function stripRemoteCredentials(remote: string | undefined): string | undefined 
 	return remote.replace(/:\/\/[^@]+@/u, "://");
 }
 
+function isExistingDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 function resolveProjectRootOverride(cwd: string): string | undefined {
 	const candidates = [process.env.PI_PROJECT_DIR, process.env.CLAUDE_PROJECT_DIR]
 		.map((value) => value?.trim())
 		.filter((value): value is string => Boolean(value));
 	for (const candidate of candidates) {
 		if (candidate.length > 0) {
-			return resolve(cwd, candidate);
+			const resolved = resolve(cwd, candidate);
+			if (isExistingDirectory(resolved)) {
+				return resolved;
+			}
 		}
 	}
 	return undefined;

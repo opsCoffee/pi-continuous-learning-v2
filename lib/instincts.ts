@@ -412,8 +412,16 @@ export async function importInstincts(
 		updated: [],
 		skipped: [],
 	};
-
+	const dedupedInstincts = new Map<string, LoadedInstinct>();
+	const staleFilePaths = new Set<string>();
 	for (const instinct of instincts) {
+		const existing = dedupedInstincts.get(instinct.id);
+		if (!existing || instinct.confidence > existing.confidence) {
+			dedupedInstincts.set(instinct.id, instinct);
+		}
+	}
+
+	for (const instinct of dedupedInstincts.values()) {
 		if (minConfidence !== undefined && instinct.confidence < minConfidence) {
 			summary.skipped.push(instinct);
 			continue;
@@ -435,6 +443,12 @@ export async function importInstincts(
 			continue;
 		}
 		if (instinct.confidence > existing.confidence) {
+			const targetFilePath = join(targetDir, `${instinct.id}.md`);
+			for (const current of currentInstincts) {
+				if (current.id === instinct.id && current.filePath !== targetFilePath) {
+					staleFilePaths.add(current.filePath);
+				}
+			}
 			const next = {
 				...existing,
 				...instinct,
@@ -455,16 +469,30 @@ export async function importInstincts(
 		summary.skipped.push(existing);
 	}
 
+	if (!dryRun) {
+		for (const filePath of staleFilePaths) {
+			await unlink(filePath).catch(() => {});
+		}
+	}
+
 	return summary;
 }
 
-export function renderInstinctExport(instincts: LoadedInstinct[]): string {
-	const header = [
-		"# Instincts Export",
-		`# Generated: ${new Date().toISOString()}`,
-		`# Count: ${instincts.length}`,
-		"",
-	];
+export function renderInstinctExport(
+	instincts: LoadedInstinct[],
+	options?: {
+		scope?: "project" | "global" | "all";
+		project?: ProjectInfo;
+	},
+): string {
+	const header = ["# Instincts export", `# Date: ${new Date().toISOString()}`, `# Total: ${instincts.length}`];
+	if (options?.scope) {
+		header.push(`# Scope: ${options.scope}`);
+	}
+	if (options?.project && options.project.id !== "global") {
+		header.push(`# Project: ${options.project.name} (${options.project.id})`);
+	}
+	header.push("");
 	return header.concat(instincts.map((instinct) => serializeInstinct(instinct))).join("\n\n");
 }
 

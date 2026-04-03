@@ -12,6 +12,7 @@ import {
 	loadProjectOnlyInstincts,
 	parseInstinctExport,
 	pendingExpiryThresholdDays,
+	pendingTtlDays,
 	prunePendingInstincts,
 	renderInstinctExport,
 	serializeInstinct,
@@ -209,6 +210,45 @@ async function loadImportSource(source: string, cwd: string): Promise<string> {
 	return readFile(resolve(cwd, source), "utf-8");
 }
 
+function appendInstinctsByDomain(
+	lines: string[],
+	instincts: Array<{
+		id: string;
+		domain: string;
+		confidence: number;
+		scopeLabel: string;
+		trigger: string;
+		content: string;
+	}>,
+): void {
+	const byDomain = new Map<string, typeof instincts>();
+	for (const instinct of instincts) {
+		const domain = instinct.domain.trim().length > 0 ? instinct.domain : "general";
+		const group = byDomain.get(domain) ?? [];
+		group.push(instinct);
+		byDomain.set(domain, group);
+	}
+
+	for (const domain of Array.from(byDomain.keys()).sort()) {
+		const group = byDomain
+			.get(domain)
+			?.slice()
+			.sort((left, right) => right.confidence - left.confidence);
+		if (!group || group.length === 0) {
+			continue;
+		}
+		lines.push(`### ${domain.toUpperCase()} (${group.length})`);
+		for (const instinct of group) {
+			lines.push(
+				`${formatConfidenceBar(instinct.confidence)} ${Math.round(instinct.confidence * 100)}% ${instinct.id} [${instinct.scopeLabel}]`,
+			);
+			lines.push(`trigger: ${instinct.trigger}`);
+			lines.push(`action: ${extractAction(instinct.content)}`);
+			lines.push("");
+		}
+	}
+}
+
 export function registerContinuousLearningCommands(
 	pi: ExtensionAPI,
 	getState: () => {
@@ -225,38 +265,56 @@ export function registerContinuousLearningCommands(
 				return;
 			}
 			const instincts = await loadMergedInstincts(layout);
-			const pending = await collectPendingInstincts(layout);
+			const [pending, observationCount] = await Promise.all([
+				collectPendingInstincts(layout, { includeAllProjects: true }),
+				countObservationLines(layout),
+			]);
 			const projectInstincts = instincts.filter((instinct) => instinct.scopeLabel === "project");
 			const globalInstincts = instincts.filter((instinct) => instinct.scopeLabel === "global");
-			const lines = [
-				`INSTINCT STATUS - ${instincts.length} total`,
-				"",
-				`Project: ${currentProjectLabel(project)}`,
-				`Project instincts: ${projectInstincts.length}`,
-				`Global instincts: ${globalInstincts.length}`,
-				"",
-			];
+			const lines =
+				instincts.length === 0
+					? [
+							"No instincts found.",
+							"",
+							`Project: ${currentProjectLabel(project)}`,
+							`Project instincts: ${layout.projectPersonalDir}`,
+							`Global instincts: ${layout.globalPersonalDir}`,
+						]
+					: [
+							`INSTINCT STATUS - ${instincts.length} total`,
+							"",
+							`Project: ${currentProjectLabel(project)}`,
+							`Project instincts: ${projectInstincts.length}`,
+							`Global instincts: ${globalInstincts.length}`,
+							"",
+						];
 
-			for (const [label, group] of [
-				[`PROJECT-SCOPED (${project.name})`, projectInstincts],
-				["GLOBAL", globalInstincts],
-			] as const) {
-				if (group.length === 0) {
-					continue;
-				}
-				lines.push(`## ${label}`);
-				for (const instinct of group.sort((left, right) => right.confidence - left.confidence)) {
-					lines.push(
-						`${formatConfidenceBar(instinct.confidence)} ${Math.round(instinct.confidence * 100)}% ${instinct.id} [${instinct.scopeLabel}]`,
-					);
-					lines.push(`trigger: ${instinct.trigger}`);
-					lines.push(`action: ${extractAction(instinct.content)}`);
-					lines.push("");
+			if (instincts.length > 0) {
+				for (const [label, group] of [
+					[`PROJECT-SCOPED (${project.name})`, projectInstincts],
+					["GLOBAL", globalInstincts],
+				] as const) {
+					if (group.length === 0) {
+						continue;
+					}
+					lines.push(`## ${label}`);
+					appendInstinctsByDomain(lines, group);
 				}
 			}
-			if (pending.length > 0) {
+			if (observationCount > 0) {
 				lines.push("---");
+				lines.push(`Observations: ${observationCount} events logged`);
+			}
+			if (pending.length > 0) {
+				if (observationCount === 0) {
+					lines.push("---");
+				}
 				lines.push(`Pending instincts: ${pending.length} awaiting review`);
+				if (pending.length >= 5) {
+					lines.push(
+						`${pending.length} pending instincts awaiting review. Unreviewed instincts auto-delete after ${pendingTtlDays()} days.`,
+					);
+				}
 				const expiringSoon = pending.filter((item) => item.ageDays >= pendingExpiryThresholdDays());
 				if (expiringSoon.length > 0) {
 					lines.push(`Expiring within 7 days:`);
@@ -327,11 +385,13 @@ export function registerContinuousLearningCommands(
 			const minConfidence = typeof minConfidenceRaw === "string" ? Number.parseFloat(minConfidenceRaw) : undefined;
 			const output = typeof parsed.flags.get("output") === "string" ? String(parsed.flags.get("output")) : undefined;
 
-			const instincts = await loadMergedInstincts(layout);
+			const instincts =
+				scope === "project" ? await loadProjectOnlyInstincts(layout) : await loadMergedInstincts(layout);
+			if (instincts.length === 0) {
+				emitReport(pi, "continuous-learning-export", "No instincts to export.");
+				return;
+			}
 			const filtered = instincts.filter((instinct) => {
-				if (scope === "project" && instinct.scopeLabel !== "project") {
-					return false;
-				}
 				if (scope === "global" && instinct.scopeLabel !== "global") {
 					return false;
 				}
@@ -343,8 +403,12 @@ export function registerContinuousLearningCommands(
 				}
 				return true;
 			});
+			if (filtered.length === 0) {
+				emitReport(pi, "continuous-learning-export", "No instincts match the criteria.");
+				return;
+			}
 
-			const rendered = renderInstinctExport(filtered);
+			const rendered = renderInstinctExport(filtered, { scope: scope as "project" | "global" | "all", project });
 			if (output) {
 				const outputPath = resolve(_ctx.cwd, output);
 				await writeTextFile(outputPath, rendered);
@@ -369,6 +433,7 @@ export function registerContinuousLearningCommands(
 				return;
 			}
 			const scope = parsed.flags.get("scope") === "global" ? "global" : "project";
+			const effectiveScope = project.id === "global" && scope === "project" ? "global" : scope;
 			const dryRun = parsed.flags.has("dry-run");
 			const force = parsed.flags.has("force");
 			const minConfidenceRaw = parsed.flags.get("min-confidence");
@@ -376,6 +441,10 @@ export function registerContinuousLearningCommands(
 
 			const raw = await loadImportSource(source, ctx.cwd);
 			const incoming = parseInstinctExport(raw);
+			if (incoming.length === 0) {
+				emitReport(pi, "continuous-learning-import", "No valid instincts found in source.");
+				return;
+			}
 			const summary = await importInstincts(layout, project, source, incoming, scope, minConfidence, true);
 			if (!force && ctx.hasUI) {
 				const confirmed = await ctx.ui.confirm(
@@ -391,7 +460,7 @@ export function registerContinuousLearningCommands(
 			emitReport(
 				pi,
 				"continuous-learning-import",
-				`Import complete for ${currentProjectLabel(project)}\nAdded: ${applied.added.length}\nUpdated: ${applied.updated.length}\nSkipped: ${applied.skipped.length}${dryRun ? "\n[DRY RUN]" : ""}`,
+				`Import complete for ${currentProjectLabel(project)}\nScope: ${effectiveScope}\nAdded: ${applied.added.length}\nUpdated: ${applied.updated.length}\nSkipped: ${applied.skipped.length}${dryRun ? "\n[DRY RUN]" : ""}`,
 			);
 		},
 	});
@@ -424,6 +493,10 @@ export function registerContinuousLearningCommands(
 			if (instinctId) {
 				const projectInstincts = await loadProjectOnlyInstincts(layout);
 				const specific = projectInstincts.find((instinct) => instinct.id === instinctId);
+				if (!specific) {
+					ctx.ui.notify(`Instinct '${instinctId}' not found in project ${project.name}`, "info");
+					return;
+				}
 				targetCandidates = specific
 					? [
 							{
@@ -436,7 +509,12 @@ export function registerContinuousLearningCommands(
 			}
 
 			if (targetCandidates.length === 0) {
-				ctx.ui.notify("No promotion candidates found", "info");
+				ctx.ui.notify(
+					instinctId
+						? "No promotion candidates found"
+						: "No instincts qualify for auto-promotion.\nCriteria: appears in 2+ projects, avg confidence >= 80%",
+					"info",
+				);
 				return;
 			}
 			if (!force && ctx.hasUI) {
